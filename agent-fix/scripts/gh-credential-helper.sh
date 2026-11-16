@@ -8,11 +8,14 @@
 # credential: it is not in a remote URL, not in an http.extraheader, and not in
 # ~/.gitconfig.
 #
-# Routing comes from a map file (default /tmp/gh-credential-map), one entry per
-# line, written by the workflow:
+# Routing comes from a map file, one entry per line, written by the workflow
+# into the directory it created for this job ($LEXI_JOB_DIR) and named in
+# GH_CREDENTIAL_MAP. There is no default under /tmp: every job on a self-hosted
+# runner host shares /tmp, so a fixed path there would hand one job's token to
+# another job's git.
 #
-#     acme/shared-sdk=/tmp/gh-token-read
-#     *=/tmp/gh-token
+#     acme/shared-sdk=<job dir>/gh-token-read
+#     *=<job dir>/gh-token
 #
 # A key other than "*" names one repository and matches git's `path` credential
 # attribute exactly, with or without `.git` (so `acme/shared-sdk` does not also
@@ -29,7 +32,10 @@
 
 set -euo pipefail
 
-MAP_FILE=${GH_CREDENTIAL_MAP:-/tmp/gh-credential-map}
+MAP_FILE=${GH_CREDENTIAL_MAP:-}
+if [ -z "$MAP_FILE" ] && [ -n "${LEXI_JOB_DIR:-}" ]; then
+  MAP_FILE="${LEXI_JOB_DIR}/gh-credential-map"
+fi
 
 # `store` and `erase` are accepted and ignored — there is nothing to persist,
 # and erroring would make git treat the helper as broken.
@@ -49,7 +55,7 @@ done
 
 [ "$protocol" = "https" ] || exit 0
 [ "$host" = "github.com" ] || exit 0
-[ -r "$MAP_FILE" ] || exit 0
+[ -n "$MAP_FILE" ] && [ -r "$MAP_FILE" ] || exit 0
 
 default_file=""
 matched_file=""

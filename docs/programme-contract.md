@@ -468,6 +468,49 @@ a brief without them and a caller without the input behave exactly as before.
 `result.json` gains an optional `taskKind` so a reader can tell a drafted
 specification from a shipped build.
 
+### What `publish` requires before it opens a pull request
+
+The run state in the hand-off (`pending`, `handback` or `drafted`) and the
+evidence files beside it were written by the job that ran the agent and the
+repository's own commands, so `publish` treats them as claims to check, not
+as a verdict:
+
+- **The task kind is the brief's**, read by `build` before the first agent
+  phase and passed as a job output. The `taskKind` in the hand-off is never
+  read.
+- **`drafted` is accepted for `technical-spec` only.** `drafted` means no RED,
+  GREEN or checks ran. On any other kind the hand-off writer turns it into a
+  hand-back and `publish` refuses it: no pull request, no GREEN or checks
+  bundle posted, the branch preserved, `result.json` `failed`. A
+  `technical-spec` run that ends `pending` is refused the same way.
+- **A code task needs all three phases, bound to the pushed commit.** RED
+  evidence on a commit the pushed head descends from; GREEN and checks evidence
+  whose `sha` is the pushed head; and a checks bundle that names `types`,
+  `lint`, `unit` and `build` (run or skipped). Anything missing or bound to
+  another commit is refused as above, with the gap named in `handbackReason`.
+- **`result.json` `status` is `shipped`, `handback` or `failed`.** `drafted`
+  is never a result; the orchestrator discards a payload that carries it, and
+  decides whether a task is a document from its own record, not from
+  `taskKind` in the result.
+
+Inside `build`, every step that runs the agent or the repository's commands
+(DRAFT, RED, GREEN, the test run and the checks) ends by stopping what they
+left running and emptying `GITHUB_ENV`, `GITHUB_PATH` and `GITHUB_OUTPUT`
+(`agent-sandbox.sh`, from a copy sealed before the first phase), and writes
+its own state and outputs only after that. The steps that compute the run
+state and the evidence call `jq` and `git` from the system directories
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), so a runner
+must have both installed there.
+
+What this does not prove: that the tests and checks were run honestly. They
+run in the same job as the agent, as the same user, and on a GitHub-hosted
+runner that user has `sudo`; an agent that sets out to forge `green.json` and
+`checks.json` for its own commit can still do so. The evidence is bound to the
+commit, not to a trusted execution of it. Require checks from a workflow the
+agent's job cannot influence (branch protection on the base branch, or a
+separate verification run on the pushed head) before treating a merge as
+verified.
+
 
 ## A phase's work outlives its verdict
 

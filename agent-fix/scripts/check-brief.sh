@@ -2,7 +2,8 @@
 # check-brief.sh — refuse a brief that names a protected path, before the agent
 # starts.
 #
-# Usage: check-brief.sh [context-json]   (default /tmp/ctx.json)
+# Usage: check-brief.sh [context-json]   (default $LEXI_JOB_DIR/ctx.json, the
+#        job's own directory; never a fixed path under /tmp)
 #
 # This cannot cover the general case: the agent decides what to edit after it
 # starts, so the pre-push hook is the real guard. This exists to fail fast on
@@ -19,7 +20,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=protected-paths.sh
 . "$SCRIPT_DIR/protected-paths.sh"
 
-CTX="${1:-/tmp/ctx.json}"
+CTX="${1:-${LEXI_JOB_DIR:+${LEXI_JOB_DIR}/ctx.json}}"
 
 if [ ! -f "$CTX" ]; then
   echo "check-brief: no context file at ${CTX}; nothing to inspect."

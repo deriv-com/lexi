@@ -139,6 +139,17 @@ on:
         required: false
         type: string
         default: main
+      artifact_suffix:
+        description: >-
+          Appended to the name of every artifact this workflow uploads, and to the
+          matching download. Leave it empty unless one run calls this workflow more
+          than once (a matrix, or two jobs): artifacts are shared by the whole run,
+          so the calls would otherwise overwrite or read each other's. Give each
+          call its own value, for example the matrix value with a leading dash.
+          Nothing outside this workflow reads these artifacts by name.
+        required: false
+        type: string
+        default: ""
     secrets:
       app_id:
         required: true
@@ -457,7 +468,7 @@ jobs:
         if: ${{ always() && steps.redact-issue.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: programme-feature-intake-output
+          name: programme-feature-intake-output${{ inputs.artifact_suffix }}
           path: |
             ${{ env.INTAKE_DIR }}/title.txt
             ${{ env.INTAKE_DIR }}/issue.md
@@ -488,7 +499,7 @@ jobs:
         if: ${{ always() && steps.redact-log.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: programme-feature-intake-${{ github.run_id }}
+          name: programme-feature-intake-${{ github.run_id }}${{ inputs.artifact_suffix }}
           path: |
             ${{ runner.temp }}/intake.jsonl
             ${{ runner.temp }}/intake.stderr
@@ -516,7 +527,7 @@ jobs:
       - name: Receive the issue from the intake job
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: programme-feature-intake-output
+          name: programme-feature-intake-output${{ inputs.artifact_suffix }}
           path: ${{ github.workspace }}/intake
 
       - name: Check the issue carries no secret

@@ -82,8 +82,16 @@ jobs:
     outputs:
       result: ${{ steps.publish.outputs.result }}
     steps:
+      # The result lives in a directory created for this job, not at a fixed
+      # path under /tmp: every job on a self-hosted runner host shares /tmp,
+      # so two rebases running at once would report each other's result.
       - name: Seed result
-        run: echo "HANDBACK" > /tmp/rebase-result
+        run: |
+          set -euo pipefail
+          umask 077
+          LEXI_JOB_DIR=$(mktemp -d "${RUNNER_TEMP}/lexi-rebase.XXXXXXXX")
+          echo "LEXI_JOB_DIR=${LEXI_JOB_DIR}" >> "$GITHUB_ENV"
+          echo "HANDBACK" > "${LEXI_JOB_DIR}/rebase-result"
 
       - name: Validate inputs
         env:
@@ -164,25 +172,25 @@ jobs:
           git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
 
           if git merge-base --is-ancestor "origin/${BASE}" HEAD; then
-            echo "ALREADY_CURRENT" > /tmp/rebase-result
+            echo "ALREADY_CURRENT" > "${LEXI_JOB_DIR}/rebase-result"
             echo "${BRANCH} already contains ${BASE}."
             exit 0
           fi
 
           BEFORE=$(git rev-parse HEAD)
           if ! git rebase "origin/${BASE}"; then
-            git diff --name-only --diff-filter=U > /tmp/rebase-conflicts.txt || true
+            git diff --name-only --diff-filter=U > "${LEXI_JOB_DIR}/rebase-conflicts.txt" || true
             git rebase --abort || true
-            echo "CONFLICT" > /tmp/rebase-result
+            echo "CONFLICT" > "${LEXI_JOB_DIR}/rebase-result"
             echo "Rebase of ${BRANCH} onto ${BASE} stopped on a conflict in:"
-            sed 's/^/  - /' /tmp/rebase-conflicts.txt
+            sed 's/^/  - /' "${LEXI_JOB_DIR}/rebase-conflicts.txt"
             exit 0
           fi
 
           # Lease on the commit we checked out: if anyone pushed to the branch
           # since, the push is refused rather than overwriting their work.
           if git push --force-with-lease="refs/heads/${BRANCH}:${BEFORE}" origin "HEAD:refs/heads/${BRANCH}"; then
-            echo "REBASED" > /tmp/rebase-result
+            echo "REBASED" > "${LEXI_JOB_DIR}/rebase-result"
           else
             echo "::error::push refused; the branch moved while rebasing"
           fi
@@ -191,14 +199,19 @@ jobs:
         id: publish
         if: always()
         run: |
-          RESULT=$(cat /tmp/rebase-result 2>/dev/null || echo HANDBACK)
+          # Unset only when the first step failed; that is a hand-back.
+          JOB_DIR="${LEXI_JOB_DIR:-}"
+          RESULT=HANDBACK
+          if [ -n "$JOB_DIR" ] && [ -s "${JOB_DIR}/rebase-result" ]; then
+            RESULT=$(cat "${JOB_DIR}/rebase-result")
+          fi
           echo "REBASE_RESULT: ${RESULT}"
           echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
           {
             echo "### Rebase result: ${RESULT}"
-            if [ -s /tmp/rebase-conflicts.txt ]; then
+            if [ -n "$JOB_DIR" ] && [ -s "${JOB_DIR}/rebase-conflicts.txt" ]; then
               echo
               echo "Conflicting files:"
-              sed 's/^/- /' /tmp/rebase-conflicts.txt
+              sed 's/^/- /' "${JOB_DIR}/rebase-conflicts.txt"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

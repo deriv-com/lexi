@@ -56,6 +56,17 @@ on:
         required: false
         type: string
         default: main
+      artifact_suffix:
+        description: >-
+          Appended to the name of every artifact this workflow uploads, and to the
+          matching download. Leave it empty unless one run calls this workflow more
+          than once (a matrix, or two jobs): artifacts are shared by the whole run,
+          so the calls would otherwise overwrite or read each other's. Give each
+          call its own value, for example the matrix value with a leading dash.
+          The orchestrator looks `programme-evidence` up by that exact name, so a suffixed copy is not a fallback read path; the POSTed evidence still is.
+        required: false
+        type: string
+        default: ""
       axe_core_version:
         description: Exact @axe-core/cli version the accessibility scan runs.
         required: false
@@ -206,7 +217,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: programme-evidence
+          name: programme-evidence${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/evidence/*.json
           overwrite: true
           if-no-files-found: warn

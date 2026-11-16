@@ -29,12 +29,45 @@ BODY="$RUNNER_TEMP/report.md"
 IMAGE_BASE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/app-build-reports/${REPORT_DIR}"
 
 # ---- images -----------------------------------------------------------
+# Only the assessment publishes images, and only screenshots and diffs that
+# are where checks.sh and visual-report.mjs put them. The manifest is written
+# after the builder's own test code ran, so it is not trusted: of each path
+# only the file name is used, looked up in the two trusted directories, and
+# the file must be a regular file (not a symlink), start with the PNG
+# signature and be under 10 MB. Anything else, such as /proc/self/environ or
+# a link to it, is skipped. The staging directory is new and empty for every
+# report.
 IMAGES_PUSHED=""
-if [ -s "$OUT/visual/visual.json" ]; then
+TRUSTED_IMAGE_DIRS=("$OUT/shots" "$OUT/visual")
+trusted_image() { # manifest path -> trusted path on stdout, or nothing
+  local NAME DIR CANDIDATE REAL ROOT
+  NAME="${1##*/}"
+  [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,200}\.png$ ]] || return 1
+  for DIR in "${TRUSTED_IMAGE_DIRS[@]}"; do
+    CANDIDATE="$DIR/$NAME"
+    [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || continue
+    ROOT="$(realpath "$DIR" 2>/dev/null)" || continue
+    REAL="$(realpath "$CANDIDATE" 2>/dev/null)" || continue
+    [ "${REAL%/*}" = "$ROOT" ] || continue
+    [ -f "$REAL" ] && [ "$(wc -c < "$REAL" | tr -d ' ')" -le 10485760 ] || continue
+    [ "$(head -c 8 "$REAL" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || continue
+    printf '%s' "$REAL"
+    return 0
+  done
+  return 1
+}
+if [ "$MODE" = "assessment" ] && [ -s "$OUT/visual/visual.json" ]; then
   STAGE="$RUNNER_TEMP/report-images"
+  rm -rf "$STAGE"
   mkdir -p "$STAGE/$REPORT_DIR"
-  jq -r 'map(select(.status == "compared")) | sort_by(-.mismatchPct) | .[0:12][] | .app, .prototype, .diff' "$OUT/visual/visual.json" \
-    | while read -r F; do [ -f "$F" ] && cp "$F" "$STAGE/$REPORT_DIR/"; done
+  jq -r 'map(select(.status == "compared")) | sort_by(-.mismatchPct) | .[0:12][] | .app, .prototype, .diff | strings' "$OUT/visual/visual.json" \
+    | while IFS= read -r F; do
+        if SAFE="$(trusted_image "$F")"; then
+          cp -- "$SAFE" "$STAGE/$REPORT_DIR/"
+        else
+          echo "::warning::Skipped a report image that is not a PNG in the checks output: ${F##*/}"
+        fi
+      done
   if [ -n "$(ls -A "$STAGE/$REPORT_DIR" 2>/dev/null)" ]; then
     (
       set -e
@@ -84,7 +117,8 @@ limit_text() { # stdin, character limit; disclose every shortened excerpt
 
 # ---- body -------------------------------------------------------------
 TOOLS="$RUNNER_TEMP/app-build"
-COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"
+# The report job has no checkout: the assess job passes the commit it checked.
+if [ -n "${LEXI_HEAD_SHA:-}" ]; then COMMIT="${LEXI_HEAD_SHA:0:7}"; else COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"; fi
 RUN_LINK="[Run log](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
 
 # The processed-through time for the `feedback-read-at` marker, which the next

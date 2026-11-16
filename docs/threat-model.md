@@ -606,6 +606,18 @@ Not mitigated, or built but not wired into `apps/server`:
     `programme-build.yml` still tells the build agent to port the UI from it
     (see [programme-contract.md](programme-contract.md#uisource--an-intent-reference)).
 
+16. **Build and programme evidence is bound to a commit, not to a trusted
+    run.** An agent that uses the runner's `sudo` in the same job can still write
+    its own green and check evidence for the head it pushed. `publish` refuses
+    unbound or incomplete evidence and `drafted` outside a technical spec
+    (see [programme-contract.md](programme-contract.md)), but only checks from a
+    workflow the agent's job cannot influence would prove the tests ran.
+17. **Shared self-hosted runners.** Job files now live in a private per-job
+    directory and artifact names take an optional suffix for callers that fan a
+    workflow out in one run, but a hostile job running as the same user on the
+    same machine can still read another job's files. Use ephemeral runners, or
+    one user per trust domain.
+
 ## Recommendations for a deployment
 
 - Start with `GOVERNED_WRITES_ENABLED=false`; list a handful of people in

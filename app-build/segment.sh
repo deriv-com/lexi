@@ -75,6 +75,11 @@ RENDER_PID=""
 SEG_RC=0
 SWEEP_FAILED=""
 GIT_SNAPSHOT="$RUNNER_TEMP/git-snapshot-$N"
+GIT_SNAPSHOT_SUM=""
+# Absolute paths, taken now: the builder can put its own tools on PATH later.
+SNAP_TAR="$(command -v tar || true)"
+SNAP_SHA="$(command -v sha256sum || true)"
+if [ -z "$SNAP_SHA" ] && command -v shasum > /dev/null; then SNAP_SHA="$(command -v shasum) -a 256"; fi
 rm -rf "$GIT_SNAPSHOT"
 # shellcheck source=../agent-fix/scripts/agent-sandbox.sh
 source "$TOOLS/agent-sandbox.sh"
@@ -105,6 +110,16 @@ git_snapshot() {
   [ -f "$HOME/.gitconfig" ] && cp -p "$HOME/.gitconfig" "$GIT_SNAPSHOT/user-config"
   [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" ] && cp -p "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" "$GIT_SNAPSHOT/xdg-config"
   touch "$GIT_SNAPSHOT/taken"
+  # The snapshot sits in RUNNER_TEMP, which the builder can write. Its digest
+  # is kept in this shell's memory, which the builder cannot reach, and
+  # checked before anything is put back.
+  GIT_SNAPSHOT_SUM="$(snapshot_sum)"
+}
+snapshot_sum() {
+  # Tools resolved when the script started, before the builder ran
+  # (SNAP_TAR, SNAP_SHA). tar records names, modes, sizes and contents.
+  [ -n "$SNAP_TAR" ] && [ -n "$SNAP_SHA" ] || { echo unavailable; return; }
+  "$SNAP_TAR" -cf - -C "$GIT_SNAPSHOT" . 2>/dev/null | $SNAP_SHA | { read -r SUM _; echo "$SUM"; }
 }
 restore_one() { # saved copy, live path
   if [ -f "$1" ]; then
@@ -115,7 +130,11 @@ restore_one() { # saved copy, live path
 }
 git_restore() {
   local G="$GITHUB_WORKSPACE/.git"
-  [ -e "$GIT_SNAPSHOT/taken" ] || return 0
+  [ -n "${GIT_SNAPSHOT_SUM:-}" ] || return 0
+  if [ ! -e "$GIT_SNAPSHOT/taken" ] || [ "$(snapshot_sum)" != "$GIT_SNAPSHOT_SUM" ]; then
+    echo "::error::Segment $N: the saved git configuration changed during the segment, so it cannot be put back safely; nothing more runs with a token."
+    return 1
+  fi
   if [ -d "$G" ]; then
     restore_one "$GIT_SNAPSHOT/repo-config" "$G/config"
     rm -rf "$G/hooks"
@@ -143,7 +162,7 @@ next_phase() {
 cleanup() {
   local RC=$? NEXT_PHASE
   if [ -n "${RENDER_PID:-}" ]; then pkill -P "$RENDER_PID" 2>/dev/null; kill "$RENDER_PID" 2>/dev/null; RENDER_PID=""; fi
-  git_restore
+  git_restore || SWEEP_FAILED=1
   # A committed batch's reference files are done with; an unprocessed batch
   # keeps them for its retry.
   if [ -s "$FEEDBACK_DIR/batch-consumed-$N.json" ]; then
@@ -165,7 +184,7 @@ cleanup() {
   sandbox_reset_file_commands
   if [ -n "${GITHUB_ENV:-}" ]; then echo "LEXI_SEGMENT_PHASE=${NEXT_PHASE}" >> "$GITHUB_ENV"; fi
   if [ -n "$SWEEP_FAILED" ]; then
-    echo "::error::Segment $N: processes the builder started could not all be stopped, so this job mints no further token."
+    echo "::error::Segment $N: processes the builder started could not all be stopped, or its git configuration could not be put back, so this job mints no further token."
     exit 1
   fi
   exit "$RC"
@@ -440,7 +459,7 @@ ELAPSED=$(( $(date +%s) - AGENT_START ))
 # The builder is done: stop what it left running and put back the git
 # configuration before anything else runs, then take the tools afresh.
 contain
-git_restore
+git_restore || SWEEP_FAILED=1
 if [ -n "$SWEEP_FAILED" ] || ! reload_tools; then
   SWEEP_FAILED=1
   exit 1

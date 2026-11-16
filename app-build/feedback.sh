@@ -76,7 +76,19 @@ fi
 # report; reports written since the fix carry `feedback-cursor=v1` and never
 # move that fallback.
 FETCH_OK=1
-COMMENTS="$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '.[] | {id: .id, node_id: .node_id, key: ("comment:" + (.id | tostring)), rank: 0, at: .created_at, who: .user.login, human: (.user.type == "User"), assoc: .author_association, body: .body, kind: "comment"}' | jq -s '.')" || FETCH_OK=0
+COMMENTS="$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '.[] | {id: .id, node_id: .node_id, key: ("comment:" + (.id | tostring)), rank: 0, at: .created_at, who: .user.login, human: (.user.type == "User"), assoc: .author_association, app: (.performed_via_github_app.id // null), body: .body, kind: "comment"}' | jq -s '.')" || FETCH_OK=0
+# Report and assessment markers count only in comments this workflow's own
+# GitHub App posted (report.sh posts with an App installation token, so GitHub
+# records the App on the comment). Marker text alone proves nothing: anyone
+# who can comment on the PR can type it. Without LEXI_APP_ID no marker is
+# trusted: no assessment reaches the builder, and the window falls back to
+# the feedback cursor on the branch.
+APP_ID="$(printf '%s' "${LEXI_APP_ID:-}" | tr -d '[:space:]')"
+if ! [[ "$APP_ID" =~ ^[0-9]+$ ]]; then
+  echo "::warning::LEXI_APP_ID is not set; report and assessment comments cannot be verified, so none is trusted."
+  APP_ID=""
+fi
+TRUSTED="$(jq -c --arg app "$APP_ID" '[.[] | select($app != "" and .human == false and ((.app // "") | tostring) == $app)]' <<< "$COMMENTS")"
 SINCE="$(jq -r '
   map(select(.body | contains("<!-- app-build:report -->"))) as $reports
   | ([$reports[].body | capture("app-build:feedback-read-at=(?<t>[0-9TZ:-]+)")? | .t] | max) as $marked
@@ -84,13 +96,16 @@ SINCE="$(jq -r '
     elif ([$reports[] | select(.body | contains("<!-- app-build:feedback-cursor=v1 -->") | not)] | length) >= 2
       then ([$reports[] | select(.body | contains("<!-- app-build:feedback-cursor=v1 -->") | not) | .at] | sort | .[-2])
     else "1970-01-01T00:00:00Z" end
-' <<< "$COMMENTS")"
+' <<< "$TRUSTED")"
 # The latest assessment (checks + independent review), posted by the
 # workflow's assess job after the previous session. It is the builder's
 # to-do list, not feedback, so it goes to its own file.
-jq -r '
-  map(select(.body | contains("<!-- app-build:assessment"))) | sort_by(.at) | last // empty | .body
-' <<< "$COMMENTS" | grep -v '^<!-- app-build:' | head -c 30000 > "$RUNNER_TEMP/assessment.md" || true
+# Only an App-posted assessment of this app and track: the marker's first line
+# must name both exactly, so another build's assessment on the PR is not taken.
+MARK_WANT="<!-- app-build:assessment app=${LEXI_APP:-}${LEXI_TRACK:+ track=${LEXI_TRACK}} session="
+jq -r --arg want "$MARK_WANT" '
+  map(select((.body | split("\n")[0]) | startswith($want))) | sort_by(.at) | last // empty | .body
+' <<< "$TRUSTED" | grep -v '^<!-- app-build:' | head -c 30000 > "$RUNNER_TEMP/assessment.md" || true
 
 # The PR's own checks can run what the assessment does not (other settings,
 # other suites), so their failures go to the builder too: each check's latest

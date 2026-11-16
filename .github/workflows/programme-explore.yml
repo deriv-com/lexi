@@ -123,6 +123,17 @@ on:
         required: false
         type: string
         default: main
+      artifact_suffix:
+        description: >-
+          Appended to the name of every artifact this workflow uploads, and to the
+          matching download. Leave it empty unless one run calls this workflow more
+          than once (a matrix, or two jobs): artifacts are shared by the whole run,
+          so the calls would otherwise overwrite or read each other's. Give each
+          call its own value, for example the matrix value with a leading dash.
+          The orchestrator looks `programme-evidence` up by that exact name, so a suffixed copy is not a fallback read path; the POSTed evidence still is.
+        required: false
+        type: string
+        default: ""
       preview_allowed_hosts:
         description: >-
           Hosts the bot-check bypass user-agent may be sent to, comma- or
@@ -732,7 +743,7 @@ jobs:
         if: ${{ always() && steps.redact-screenshots.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sweep-screenshots
+          name: sweep-screenshots${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/sweep/screenshots/
           if-no-files-found: ignore
 
@@ -773,7 +784,7 @@ jobs:
         if: ${{ always() && steps.handoff.outcome == 'success' && steps.redact-handoff.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sweep-handoff
+          name: sweep-handoff${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/sweep-handoff/
           overwrite: true
           retention-days: 7
@@ -822,7 +833,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: sweep-handoff
+          name: sweep-handoff${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/sweep
 
       - name: Read whether the sweep ran
@@ -994,7 +1005,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sweep-report
+          name: sweep-report${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/sweep-report/sweep-report.json
           overwrite: true
           if-no-files-found: warn
@@ -1052,7 +1063,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: programme-evidence
+          name: programme-evidence${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/evidence/*.json
           overwrite: true
           if-no-files-found: warn
