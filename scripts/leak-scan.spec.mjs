@@ -96,5 +96,15 @@ describe("leak-scan", () => {
       expect(entries.map((e) => e.file)).toEqual(["pull request branch", "pull request title"]);
       expect(entries.flatMap((e) => scanText(e.file, e.text, rules)).map((f) => f.file)).toEqual(["pull request branch"]);
     });
+
+    it("allows a commit author line listed in the allowlist, and nothing else in the commit", () => {
+      const allow = parseAllowlist("commit * | author: alice@acme-internal.example  # public email");
+      const [entry] = parseCommitLog(
+        "abc123def4567890\x1falice@acme-internal.example\x1fbob@acme-internal.example\x1fmsg\n\x1e\n",
+      );
+      expect(scanText(entry.file, entry.text, rules, allow).map((f) => f.line)).toEqual([2]);
+      const prTitle = pullRequestEntries({ PR_TITLE: "author: alice@acme-internal.example" });
+      expect(scanText(prTitle[0].file, prTitle[0].text, rules, allow)).toHaveLength(1);
+    });
   });
 });
