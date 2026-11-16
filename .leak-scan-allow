@@ -8,3 +8,5 @@ NOTICE | Deriv Group  # copyright holder, required by the Apache-2.0 NOTICE
 .leak-scan-allow | default: deriv-com/lexi  # the workflow allowlist entry above
 examples/workflows/*.yml | uses: deriv-com/lexi/.github/workflows/  # example callers reference the reusable workflows
 .leak-scan-allow | uses: deriv-com/lexi/.github/workflows/  # the example-caller allowlist entry above
+.github/CODEOWNERS | @muthina-deriv  # the maintainer's public GitHub login
+.leak-scan-allow | @muthina-deriv  # the CODEOWNERS allowlist entry above
