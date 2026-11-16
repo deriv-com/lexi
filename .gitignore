@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+!apps/build/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+.env
+.env.local
+.vscode/
+.idea/
+
+# Private leak-scan patterns. Never commit: the file names the internal systems
+# and people it guards against. CI reads the same list from a repository secret.
+.leak-patterns.local
+
+# Agent worktrees created by Claude Code. Each is a separate checkout.
+.claude/worktrees/

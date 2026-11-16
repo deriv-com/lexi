@@ -1,0 +1,1703 @@
+// Lexi - Prisma schema (PostgreSQL with the pgvector extension).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+enum WorkflowStatus {
+  NEW
+  QUEUED
+  EVIDENCE_ASSESSMENT
+  SENT_TO_REPRODUCTION
+  WAITING
+  RESULT_RECEIVED
+  AI_ANALYSIS
+  VERIFIED
+  ASSIGNED
+  SLACK_NOTIFIED
+  IN_PROGRESS
+  PR_CREATED
+  MERGED
+  RETEST
+  CLOSED
+  FAILED
+  CANCELLED
+  WRITE_BLOCKED
+  CLOSE_RECOMMENDED
+  DRY_RUN_COMPLETED
+}
+
+enum SlackConversationStatus {
+  RECEIVED
+  ACKNOWLEDGED
+  PLANNING
+  REPRODUCING
+  AWAITING_HUMAN_INPUT
+  ANALYSING
+  POLICY_EVALUATION
+  ACTION_EXECUTED
+  ACTION_BLOCKED
+  COMPLETED
+}
+
+enum ReproductionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMEOUT
+  CANCELLED
+}
+
+enum DecisionClassification {
+  VERIFIED
+  LIKELY_FIXED
+  CANNOT_REPRODUCE
+  DUPLICATE
+  NEEDS_MORE_INFO
+  NEEDS_MANUAL_INVESTIGATION
+  NOT_OBSERVED_WITH_COMPLETE_COVERAGE
+  BLOCKED_BY_OTP
+  BLOCKED_BY_KYC
+  BLOCKED_BY_PAYMENT
+  BLOCKED_BY_CREDENTIALS
+  BLOCKED_BY_ENVIRONMENT
+}
+
+enum NotificationTemplate {
+  VERIFIED
+  NEEDS_INFO
+  CANNOT_REPRODUCE
+  MANUAL_INVESTIGATION
+  REMINDER
+  ESCALATION
+}
+
+model Team {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  slackChannel String
+  description  String?
+  owners       Owner[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("teams")
+}
+
+model Owner {
+  id          String   @id @default(uuid())
+  name        String
+  githubLogin String   @unique
+  slackUserId String?
+  active      Boolean  @default(true)
+  team        Team?    @relation(fields: [teamId], references: [id])
+  teamId      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("owners")
+}
+
+model Issue {
+  id               String   @id @default(uuid())
+  githubIssueId    BigInt   @unique
+  githubNumber     Int
+  repoOwner        String
+  repoName         String
+  title            String
+  body             String?
+  url              String
+  authorLogin      String?
+  labels           String[]
+  state            String   @default("open")
+  currentStatus    WorkflowStatus @default(NEW)
+  assignedOwner    String?
+  assignedTeam     String?
+  githubCreatedAt  DateTime
+  githubUpdatedAt  DateTime
+  lastSyncedAt     DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  states                IssueState[]
+  workflowExecutions    WorkflowExecution[]
+  reproductionAttempts  ReproductionAttempt[]
+  decisions             Decision[]
+  notifications         Notification[]
+  evidence              Evidence[]
+  auditLogs             AuditLog[]
+  slackConversations    SlackConversation[]
+
+  @@index([repoOwner, repoName])
+  @@index([currentStatus])
+  @@map("issues")
+}
+
+model IssueState {
+  id         String         @id @default(uuid())
+  issue      Issue          @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId    String
+  status     WorkflowStatus
+  enteredAt  DateTime       @default(now())
+  metadata   Json?
+  note       String?
+
+  @@index([issueId])
+  @@map("issue_states")
+}
+
+model WorkflowExecution {
+  id             String         @id @default(uuid())
+  issue          Issue          @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId        String
+  status         WorkflowStatus @default(NEW)
+  idempotencyKey String         @unique
+  jobId          String?
+  attempts       Int            @default(0)
+  lastError      String?
+  startedAt      DateTime       @default(now())
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  reproductionAttempts ReproductionAttempt[]
+
+  @@index([issueId])
+  @@index([status])
+  @@map("workflow_executions")
+}
+
+model ReproductionAttempt {
+  id                  String              @id @default(uuid())
+  issue               Issue               @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId             String
+  workflowExecution   WorkflowExecution?  @relation(fields: [workflowExecutionId], references: [id])
+  workflowExecutionId String?
+  providerName        String
+  externalId          String              @unique
+  status              ReproductionStatus  @default(PENDING)
+  resultSummary        String?
+  resultDetails        Json?
+  logsUrl              String?
+  retryCount           Int                @default(0)
+  submittedAt          DateTime           @default(now())
+  completedAt          DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  decisions Decision[]
+
+  @@index([issueId])
+  @@index([status])
+  @@map("reproduction_attempts")
+}
+
+model Decision {
+  id                     String                  @id @default(uuid())
+  issue                  Issue                   @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId                String
+  reproductionAttempt    ReproductionAttempt?    @relation(fields: [reproductionAttemptId], references: [id])
+  reproductionAttemptId  String?
+  classification         DecisionClassification
+  component              String
+  team                   String
+  owner                  String?
+  confidence             Float
+  labels                 String[]
+  summary                String
+  reasoning              String
+  nextAction             String
+  rawModelOutput         Json?
+  createdAt              DateTime                @default(now())
+
+  notifications Notification[]
+
+  @@index([issueId])
+  @@map("decisions")
+}
+
+model Notification {
+  id         String                @id @default(uuid())
+  issue      Issue                 @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId    String
+  decision   Decision?             @relation(fields: [decisionId], references: [id])
+  decisionId String?
+  template   NotificationTemplate
+  channel    String
+  messageTs  String?
+  success    Boolean               @default(false)
+  error      String?
+  sentAt     DateTime              @default(now())
+
+  @@index([issueId])
+  @@map("notifications")
+}
+
+model SlackConversation {
+  id            String                 @id @default(uuid())
+  issue         Issue                  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId       String
+  channel       String
+  threadTs      String
+  status        SlackConversationStatus @default(RECEIVED)
+  lastMessageTs String?
+  metadata      Json?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  @@unique([channel, threadTs])
+  @@index([issueId])
+  @@map("slack_conversations")
+}
+
+model Evidence {
+  id          String   @id @default(uuid())
+  issue       Issue    @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueId     String
+  type        String
+  url         String?
+  description String?
+  createdAt   DateTime @default(now())
+
+  @@index([issueId])
+  @@map("evidence")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  issue     Issue?   @relation(fields: [issueId], references: [id])
+  issueId   String?
+  actor     String
+  action    String
+  details   Json?
+  /// `${channel}:${threadTs}` for agent rows, promoted out of `details` so
+  /// thread-scoped reads are an indexed lookup rather than a JSON path scan
+  /// The agent read path currently filters on
+  /// `details.threadKey`, which every write path already persists; this column
+  /// is the indexed destination that read moves to once backfilled.
+  threadKey String?
+  createdAt DateTime @default(now())
+
+  @@index([issueId])
+  @@index([threadKey])
+  @@map("audit_logs")
+}
+
+model MetricsSnapshot {
+  id          String   @id @default(uuid())
+  capturedAt  DateTime @default(now())
+  metricsJson Json
+
+  @@map("metrics_snapshots")
+}
+
+model GovernanceRun {
+  id          String   @id @default(uuid())
+  runType     String
+  status      String   @default("running")
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  snapshot    Json?
+  budgetUsage Json?
+  createdAt   DateTime @default(now())
+
+  pendingClosures PendingClosure[]
+  policyEvaluations PolicyEvaluation[]
+  budgetUsages    RunBudgetUsage[]
+
+  @@index([runType])
+  @@map("governance_runs")
+}
+
+model IntakeSubmission {
+  id         String   @id @default(uuid())
+  requestId  String   @unique
+  sourceType String
+  payload    Json
+  status     String   @default("received")
+  createdAt  DateTime @default(now())
+
+  decision IntakeDecision?
+
+  @@map("intake_submissions")
+}
+
+model IntakeDecision {
+  id                   String   @id @default(uuid())
+  requestId            String   @unique
+  submission           IntakeSubmission @relation(fields: [requestId], references: [requestId])
+  verdict              String
+  response             Json
+  canonicalIssueNumber Int?
+  createdAt            DateTime @default(now())
+
+  @@map("intake_decisions")
+}
+
+model DuplicateCandidate {
+  id           String   @id @default(uuid())
+  clusterId    String?
+  issueNumber  Int
+  repository   String
+  similarity   Float
+  verdict      String
+  confidence   Float
+  reasoning    String?
+  createdAt    DateTime @default(now())
+
+  @@index([clusterId])
+  @@map("duplicate_candidates")
+}
+
+model DuplicateCluster {
+  id              String   @id @default(uuid())
+  canonicalNumber Int
+  repository      String
+  memberNumbers   Int[]
+  runId           String?
+  createdAt       DateTime @default(now())
+
+  @@map("duplicate_clusters")
+}
+
+model CanonicalIssueLink {
+  id              String   @id @default(uuid())
+  intakeRequestId String?
+  canonicalNumber Int
+  repository      String
+  linkType        String
+  createdAt       DateTime @default(now())
+
+  @@index([canonicalNumber, repository])
+  @@map("canonical_issue_links")
+}
+
+model PendingClosure {
+  id              String   @id @default(uuid())
+  issueId         String?
+  githubNumber    Int
+  repository      String
+  runId           String?
+  governanceRun   GovernanceRun? @relation(fields: [runId], references: [id])
+  status          String   @default("pending")
+  scheduledCloseAt DateTime
+  gracePeriodDays Int
+  evidenceSummary Json?
+  cancelledAt     DateTime?
+  cancelReason    String?
+  createdAt       DateTime @default(now())
+
+  @@index([status])
+  @@index([githubNumber, repository])
+  @@map("pending_closures")
+}
+
+model ClosureCancellation {
+  id                         String   @id @default(uuid())
+  closureId                  String
+  reasonCode                 String
+  reason                     String?
+  actor                      String?
+  sourceUrl                  String?
+  previousScheduledClosureAt DateTime?
+  createdAt                  DateTime @default(now())
+
+  @@index([closureId])
+  @@map("closure_cancellations")
+}
+
+model EscalationRecord {
+  id           String   @id @default(uuid())
+  issueId      String?
+  classification String
+  provider     String
+  externalId   String?
+  status       String   @default("pending")
+  details      Json?
+  createdAt    DateTime @default(now())
+
+  @@map("escalation_records")
+}
+
+model PolicyEvaluation {
+  id            String   @id @default(uuid())
+  policyId      String
+  policyVersion String
+  runId         String?
+  governanceRun GovernanceRun? @relation(fields: [runId], references: [id])
+  inputs        Json
+  outcome       String
+  reasons       String[]
+  createdAt     DateTime @default(now())
+
+  @@index([policyId])
+  @@index([runId])
+  @@map("policy_evaluations")
+}
+
+model RunBudgetUsage {
+  id        String   @id @default(uuid())
+  runId     String
+  governanceRun GovernanceRun @relation(fields: [runId], references: [id])
+  action    String
+  used      Int      @default(0)
+  limit     Int
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@map("run_budget_usages")
+}
+
+model Digest {
+  id        String   @id @default(uuid())
+  runId     String   @unique
+  content   Json
+  markdown  String
+  createdAt DateTime @default(now())
+
+  @@map("digests")
+}
+
+model QuickFixAttempt {
+  id         String   @id @default(uuid())
+  issueId    String?
+  githubNumber Int
+  status     String   @default("pending")
+  eligible   Boolean  @default(false)
+  reasons    String[]
+  /// PR opened by the `direct-fix.yml` run this attempt tracks, once known.
+  /// Shared across the eligibility-gate flow and the dispatch/poll flow —
+  /// do not add a second PR-number field for the latter.
+  prNumber   Int?
+  createdAt  DateTime @default(now())
+
+  /// "owner/repo" of the target dispatched (e.g. "acme/web-app").
+  repository     String
+  /// Slack channel the originating bug report/thread lives in, if this
+  /// attempt was triggered from a conversational Lexi flow.
+  sourceChannel  String?
+  /// Slack thread ts of the originating report; also the correlation key the
+  /// dispatched workflow's own concurrency group is keyed on.
+  sourceThreadTs String?
+  /// When `dispatchWorkflow` was called; the lower bound `findDispatchedRun`
+  /// polls from.
+  dispatchedAt   DateTime?
+  workflowRunId  BigInt?
+  workflowRunUrl String?
+  /// pending | dispatched | running | shipped | handback | failed | timed_out |
+  /// stale_closed (auto-closed by the stale-PR chase sweep — see
+  /// stale-pr-chase.service.ts; the underlying issue/thread is left as-is)
+  resultStatus   String    @default("pending")
+  /// Text captured from the run's fenced DIRECT_FIX_RESULT block once terminal.
+  resultText     String?
+  /// Character count of the `bug_text` actually put on the wire for this
+  /// dispatch. Recorded so "the fixer solved a narrower problem than the
+  /// analysis" can be answered from the ledger instead of by re-reading a run
+  /// log: a brief far shorter than the thread's analysis is the signature of
+  /// the truncation bug this column was added to make impossible to hide.
+  briefChars     Int?
+  /// Slack user ID of the original bug reporter, tagged in the ship-time reply.
+  reporterSlackId String?
+  /// Feature-area category (see config/quick-fix-owners.yaml), used to resolve
+  /// who gets tagged as code owner in the ship-time team-channel announcement.
+  category        String?
+  /// When the stale-PR chase sweep posted its 7-day "still unreviewed" nudge
+  /// for this attempt's PR, if it has. Prevents re-nudging on every sweep
+  /// tick — the sweep only nudges once per attempt (`staleNudgeSentAt` null)
+  /// and only auto-closes past the separate 14-day threshold.
+  staleNudgeSentAt DateTime?
+  /// Approved spec this attempt implements, when it came from the spec
+  /// pipeline rather than a bug report. `trigger_code_task(feature)` is
+  /// refused without one, so feature work cannot start unspecified.
+  specId           String?
+  /// WorkItem this attempt delivers, for non-bug work that never had a
+  /// issues number.
+  workItemId       String?
+
+  /// Rebuild programme attempts only: the build task (or `<milestone>:sweep`)
+  /// this dispatch serves. Null on every other kind of attempt.
+  buildTaskId              String?
+  /// The task's kind (screen, shared module, document ...) at dispatch time.
+  taskKind                 String?
+  /// 1-based attempt number of this dispatch for its build task.
+  attemptNumber            Int?
+  /// The model the brief named for this attempt, so model choice can be read
+  /// from history.
+  model                    String?
+  /// Terminal programme outcome: shipped | handback | failed | infra_handback |
+  /// no_result | dispatch_failed. Deliberately separate from `resultStatus`,
+  /// which other readers of this ledger interpret as their own.
+  outcome                  String?
+  /// When the attempt reached its terminal outcome.
+  completedAt              DateTime?
+  /// Token spend reported by the run, summed across models.
+  inputTokens              Int?
+  cachedInputTokens        Int?
+  cacheCreationInputTokens Int?
+  outputTokens             Int?
+  /// Priced from the deployment's model pricing; null when any model is unpriced.
+  estimatedCostUsd         Float?
+  /// Cost as reported by the runner itself, when every model reported one.
+  reportedCostUsd          Float?
+
+  @@index([buildTaskId])
+  @@map("quick_fix_attempts")
+}
+
+/// A dispatched `rebase-branch.yml` run, so its outcome reaches the thread that
+/// asked for it.
+///
+/// Rebase is the one dispatch here that REWRITES history, so `tipBefore` is not
+/// bookkeeping — after a force-push it is the only record of what the branch
+/// pointed at, and the only handle anyone has to recover it.
+model RebaseRun {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  /// "owner/repo" the rebase workflow is dispatched in. For a repository with
+  /// submodules, the run reaches them through its own submodule checkout.
+  repository String
+  /// The feature branch being rebased, in every repo of the stack that has it.
+  branch     String
+  /// What it is being replayed onto. Defaults to main at dispatch.
+  onto       String
+
+  sourceChannel  String?
+  sourceThreadTs String?
+  /// When `dispatchWorkflow` was called; the lower bound run correlation polls from.
+  dispatchedAt   DateTime?
+  workflowRunId  BigInt?
+  workflowRunUrl String?
+
+  /// dispatched | running | rebased | already_current | conflict | handback | failed | timed_out
+  ///
+  /// `conflict` is TERMINAL BUT NOT A FAILURE: the workflow aborted the rebase,
+  /// left the branch byte-identical to how it started, and named what a human
+  /// has to decide. Collapsing it into `failed` would send someone hunting for
+  /// a broken workflow instead of reading the conflict.
+  resultStatus String @default("dispatched")
+  /// Text from the run's fenced REBASE_RESULT block once it lands.
+  resultText   String?
+  /// Slack id of whoever asked for the rebase, for the reply's attribution.
+  requestedBy  String?
+
+  @@index([resultStatus])
+  @@map("rebase_runs")
+}
+
+model PullRequestRecord {
+  id         String   @id @default(uuid())
+  issueNumber Int
+  prNumber   Int
+  repository String
+  status     String   @default("open")
+  autofix    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@map("pull_request_records")
+}
+
+model RollbackExecution {
+  id        String   @id @default(uuid())
+  runId     String
+  actor     String
+  result    Json
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@map("rollback_executions")
+}
+
+model CrossOrgLink {
+  id              String   @id @default(uuid())
+  sourceRepo      String
+  sourceNumber    Int
+  targetRepo      String
+  targetNumber    Int
+  linkType        String
+  syncId          String?
+  createdAt       DateTime @default(now())
+
+  @@unique([sourceRepo, sourceNumber, targetRepo, targetNumber])
+  @@map("cross_org_links")
+}
+
+model HumanOverride {
+  id        String   @id @default(uuid())
+  issueId   String?
+  label     String?
+  field     String?
+  value     String?
+  actor     String?
+  createdAt DateTime @default(now())
+
+  @@map("human_overrides")
+}
+
+model VectorIndexRecord {
+  id          String   @id @default(uuid())
+  documentId  String   @unique
+  issueNumber Int
+  repository  String
+  textHash    String
+  updatedAt   DateTime @default(now())
+
+  @@index([repository, issueNumber])
+  @@map("vector_index_records")
+}
+
+// ---------------------------------------------------------------------------
+// Persistent semantic duplicate detection
+// ---------------------------------------------------------------------------
+
+/// Issue embeddings for pgvector-based semantic duplicate search.
+/// One embedding per issue per model version. Bound to source text revision
+/// via textHash for drift detection.
+model IssueEmbedding {
+  id              String   @id @default(uuid())
+  issueNumber     Int
+  repository      String
+  // embedding column is Unsupported("vector(1536)") — managed via raw SQL
+  embeddingModel  String
+  modelVersion    String
+  textHash        String
+  textPreview     String?
+  dimensions      Int      @default(1536)
+  indexedAt        DateTime @default(now())
+  updatedAt        DateTime @default(now())
+  sourceRevision  String?
+
+  @@unique([issueNumber, repository, embeddingModel, modelVersion])
+  @@index([repository])
+  @@index([textHash])
+  @@index([embeddingModel, modelVersion])
+  @@map("issue_embeddings")
+}
+
+/// Audit trail for duplicate adjudication decisions.
+model DuplicateAdjudication {
+  id                    String   @id @default(uuid())
+  sourceIssueNumber     Int
+  sourceRepository      String
+  candidateIssueNumber  Int
+  candidateRepository   String
+  verdict               String
+  confidence            Float
+  reasoning             String
+  overlappingSignals    String[] @default([])
+  differingSignals      String[] @default([])
+  adjudicationMethod    String   @default("heuristic")
+  modelUsed             String?
+  runId                 String?
+  humanOverride         String?
+  humanOverrideActor    String?
+  humanOverrideAt       DateTime?
+  consolidationId       String?
+  createdAt             DateTime @default(now())
+
+  @@index([sourceIssueNumber, sourceRepository])
+  @@index([candidateIssueNumber, candidateRepository])
+  @@index([verdict])
+  @@index([runId])
+  @@map("duplicate_adjudications")
+}
+
+/// Records information preserved from source issue onto canonical before closure.
+model ConsolidationRecord {
+  id                    String   @id @default(uuid())
+  sourceIssueNumber     Int
+  sourceRepository      String
+  canonicalIssueNumber  Int
+  canonicalRepository   String
+  preservedContent      String
+  consolidationType     String   @default("comment")
+  githubCommentId       BigInt?
+  adjudicationId        String?
+  createdAt             DateTime @default(now())
+
+  @@index([canonicalIssueNumber, canonicalRepository])
+  @@index([sourceIssueNumber, sourceRepository])
+  @@map("consolidation_records")
+}
+
+/// Queue for human adjudication of medium-confidence duplicate candidates.
+model HumanAdjudicationRequest {
+  id                    String    @id @default(uuid())
+  sourceIssueNumber     Int
+  sourceRepository      String
+  candidateIssueNumber  Int
+  candidateRepository   String
+  confidence            Float
+  reasoning             String
+  slackChannel          String?
+  slackMessageTs        String?
+  status                String    @default("pending")
+  resolution            String?
+  resolvedBy            String?
+  resolvedAt            DateTime?
+  reporterRejection     Boolean   @default(false)
+  reporterRejectionReason String?
+  createdAt             DateTime  @default(now())
+  expiresAt             DateTime?
+
+  @@index([status])
+  @@index([sourceIssueNumber, sourceRepository])
+  @@map("human_adjudication_requests")
+}
+
+/// Periodic health snapshots for the embedding index.
+model EmbeddingIndexHealth {
+  id              String   @id @default(uuid())
+  totalDocuments  Int      @default(0)
+  staleDocuments  Int      @default(0)
+  embeddingModel  String
+  modelVersion    String
+  avgAge          Float?
+  oldestEmbedding DateTime?
+  newestEmbedding DateTime?
+  capturedAt      DateTime @default(now())
+
+  @@map("embedding_index_health")
+}
+
+model EvidenceRetentionRecord {
+  id         String   @id @default(uuid())
+  evidenceId String?
+  policyId   String
+  retainedUntil DateTime?
+  redacted   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@map("evidence_retention_records")
+}
+
+model AgentActionPlan {
+  id              String   @id @default(uuid())
+  channelId       String
+  threadTs        String
+  actorId         String
+  action          String   // batch_process | batch_notify
+  query           Json
+  issueSnapshot   Json     // Array<{issueId, githubNumber, revision}>
+  status          String   @default("pending_confirmation")
+  expiresAt       DateTime
+  confirmedBy     String?
+  confirmedAt     DateTime?
+  runId           String?
+  idempotencyKey  String   @unique
+  maxIssues       Int      @default(50)
+  concurrencyCap  Int      @default(5)
+  executedCount   Int      @default(0)
+  failedCount     Int      @default(0)
+  results         Json?    // per-item outcomes
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([actorId, status])
+  @@index([status, expiresAt])
+  @@map("agent_action_plans")
+}
+
+// ---------------------------------------------------------------------------
+// Evidence-First Pipeline — assessment records
+// ---------------------------------------------------------------------------
+
+// One record per issue assessment pass. Referenced by workflowExecutionId so
+// replay can reconstruct the full evidence→decision→routing chain.
+model EvidenceAssessmentRecord {
+  id                   String   @id @default(uuid())
+  issueId              String
+  workflowExecutionId  String?
+  inputRevision        String   // title+timestamp hash for replay correlation
+
+  // Stage completion flags
+  analysisStatus             String  @default("pending")  // pending|completed|skipped|failed
+  evidenceAssessmentStatus   String  @default("pending")
+  investigationStatus        String  @default("pending")
+  fixAssessmentStatus        String  @default("pending")
+  reproductionDecisionStatus String  @default("pending")
+
+  // Persisted stage outputs (Json allows forward-compatible schema evolution)
+  issueAnalysis        Json?  // IssueAnalysisResult
+  observationAssessment Json? // ObservationAssessment
+  engineeringInvestigation Json? // EngineeringInvestigation
+  fixAssessment        Json?  // FixAssessment
+  reproductionDecision Json?  // ReproductionDecision
+
+  // Policy metadata
+  policyVersion        String?
+  analysisModel        String?  // which LLM was used
+  analysisSource       String?  // "llm" | "fallback"
+
+  // Routing outcome
+  routedTo             String?  // WorkflowStatus value or action taken
+  routingReason        String?
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([issueId])
+  @@index([workflowExecutionId])
+  @@map("evidence_assessment_records")
+}
+
+// ---------------------------------------------------------------------------
+// Lexi Memory Engine
+// ---------------------------------------------------------------------------
+
+// Engineering Knowledge Graph — nodes
+model KnowledgeNode {
+  id          String   @id @default(uuid())
+  type        String   // issue | pull_request | commit | release | component | engineer | scenario | regression
+  externalId  String?  // GitHub number, commit SHA, release tag
+  repo        String?
+  title       String?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  outEdges    KnowledgeEdge[] @relation("from_node")
+  inEdges     KnowledgeEdge[] @relation("to_node")
+
+  @@unique([type, externalId, repo])
+  @@index([type])
+  @@index([repo])
+  @@map("knowledge_nodes")
+}
+
+// Engineering Knowledge Graph — edges (relationships)
+model KnowledgeEdge {
+  id            String   @id @default(uuid())
+  fromNodeId    String
+  toNodeId      String
+  relationship  String   // fixed_by | introduced_by | related_to | duplicate_of | regressed_from | owned_by | released_in | changed_by | verified_by | caused_by
+  confidence    Float    @default(1.0)
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now())
+
+  fromNode      KnowledgeNode @relation("from_node", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNode        KnowledgeNode @relation("to_node", fields: [toNodeId], references: [id], onDelete: Cascade)
+
+  @@index([fromNodeId])
+  @@index([toNodeId])
+  @@index([relationship])
+  @@map("knowledge_edges")
+}
+
+// User Preferences
+model UserPreference {
+  id              String   @id @default(uuid())
+  slackId         String   @unique
+  githubLogin     String?
+  displayName     String?
+  detailLevel     String   @default("standard")  // brief | standard | detailed
+  timezone        String?
+  role            String   @default("engineer")   // engineer | qa | lead | manager | admin | viewer
+  teams           String[] @default([])
+  watchedRepos    String[] @default([])
+  watchedIssues   Int[]    @default([])
+  ownedComponents String[] @default([])
+  preferences     Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("user_preferences")
+}
+
+// Issue Memory — rolling compressed summaries
+model IssueMemory {
+  id                String   @id @default(uuid())
+  issueNumber       Int
+  repo              String
+  summary           String   @default("")
+  facts             Json     @default("[]")   // IssueFact[]
+  regressionChain   Json?                     // RegressionChainEntry[]
+  investigations    Json     @default("[]")   // InvestigationSummary[]
+  processCount      Int      @default(0)
+  lastUpdatedAt     DateTime @default(now())
+  expiresAt         DateTime?
+
+  @@unique([issueNumber, repo])
+  @@index([repo])
+  @@map("issue_memories")
+}
+
+// Intake Draft — persistent multi-turn conversational bug filing
+model IntakeDraft {
+  id                  String   @id @default(uuid())
+  channel             String
+  threadTs            String
+  reporterSlackId     String
+  fields              Json     @default("{}")
+  missingFields       String[] @default([])
+  coachingRounds      Int      @default(0)
+  maxCoachingRounds   Int      @default(3)
+  status              String   @default("COLLECTING")
+  decision            Json?
+  canonicalIssueNumber Int?
+  sourceType          String   @default("slack")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  expiresAt           DateTime
+
+  @@unique([channel, threadTs])
+  @@index([reporterSlackId])
+  @@index([status])
+  @@map("intake_drafts")
+}
+
+// ---------------------------------------------------------------------------
+// Engineering intelligence and GitHub Projects
+// ---------------------------------------------------------------------------
+
+/// Deployment records — tracks which releases are deployed to which environments.
+model DeploymentRecord {
+  id                  String   @id @default(uuid())
+  /// Keys the fix chain by work item, and is the evidence a FEATURE is verified by
+  /// (config/feature-policy.yaml: verification.featureVerifiedBy =
+  /// deployment_record). A bug is verified by retest; everything else needs a
+  /// row here, which is why the work item must be addressable from a deployment.
+  workItemId          String?
+  releaseVersion      String
+  repository          String
+  environment         String   @default("production")
+  deployedAt          DateTime
+  deployedBy          String?
+  commitSha           String?
+  status              String   @default("success")
+  verifiedAt          DateTime?
+  verificationResult  String?
+  metadata            Json     @default("{}")
+  createdAt           DateTime @default(now())
+
+  @@index([workItemId])
+  @@index([releaseVersion, repository])
+  @@index([environment, deployedAt])
+  @@index([repository])
+  @@map("deployment_records")
+}
+
+/// GitHub Projects v2 item tracking — maps issues to project board items.
+model ProjectBoardItem {
+  id                String    @id @default(uuid())
+  issueNumber       Int
+  issueRepository   String
+  projectOrg        String
+  projectNumber     Int
+  projectItemId     String?
+  status            String?
+  statusFieldId     String?
+  iteration         String?
+  priority          String?
+  assignee          String?
+  lastSyncedAt      DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @default(now())
+
+  @@unique([issueNumber, issueRepository, projectOrg, projectNumber])
+  @@index([projectOrg, projectNumber])
+  @@index([status])
+  @@map("project_board_items")
+}
+
+/// Implementation links — tracks which implementation repo issues/PRs fix production issues.
+/// Fix chain, keyed by `workItemId`.
+///
+/// The chain used to be keyed by `(productionIssueNumber, productionRepository)`,
+/// which silently assumed every tracked thing is a row in the issues
+/// bug corpus. A feature or chore has no production issue number, so it could
+/// not participate in the chain at all.
+///
+/// `workItemId` is the new key. The legacy pair is NULLABLE rather than removed:
+/// pre-migration rows keep their values and are still matched by the
+/// back-compat OR branch in `FixChainKeyResolver.readWhere()`, while a work item
+/// tracked outside issues writes `workItemId` and leaves the legacy
+/// pair null. `writeKey()` deliberately does NOT stamp the legacy columns for a
+/// product-repo item — product-repo issue numbers share a number space with
+/// unrelated production issues, so doing so would attach one item's PRs to
+/// another item's bug.
+model ImplementationLink {
+  id                          String   @id @default(uuid())
+  workItemId                  String?
+  productionIssueNumber       Int?
+  productionRepository        String?
+  implementationIssueNumber   Int?
+  implementationRepository    String
+  prNumber                    Int?
+  linkType                    String   @default("fixes")
+  status                      String   @default("open")
+  confidence                  Float    @default(1.0)
+  discoveredVia               String   @default("timeline")
+  lastCheckedAt               DateTime?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @default(now())
+
+  @@index([workItemId])
+  @@index([productionIssueNumber, productionRepository])
+  @@index([implementationRepository])
+  @@index([status])
+  @@map("implementation_links")
+}
+
+/// Capability gaps — records when verification is UNSUPPORTED for intelligence aggregation.
+model CapabilityGapRecord {
+  id                  String   @id @default(uuid())
+  issueNumber         Int
+  repository          String
+  executor            String
+  reason              String
+  requiredCapability  String
+  detectedAt          DateTime
+  issueTitle          String?
+  issueLabels         String[] @default([])
+  createdAt           DateTime @default(now())
+
+  @@index([requiredCapability])
+  @@index([issueNumber, repository])
+  @@index([detectedAt])
+  @@map("capability_gaps")
+}
+
+/// Feedback corrections — human corrections of Lexi decisions for learning.
+model FeedbackCorrection {
+  id                String   @id @default(uuid())
+  issueNumber       Int
+  repository        String
+  category          String
+  originalDecision  String
+  correction        String
+  correctedBy       String
+  reason            String?
+  decisionId        String?
+  team              String?
+  component         String?
+  createdAt         DateTime @default(now())
+
+  @@index([issueNumber, repository])
+  @@index([category])
+  @@index([createdAt])
+  @@map("feedback_corrections")
+}
+
+/// Per-repository corpus sync state.
+///
+/// This is the DURABLE watermark store for GitHubCorpusSyncService. It used to
+/// be an in-process Map, which meant the watermark reset on every scheduled
+/// tick (the service was reconstructed per cron fire), so `since` always fell
+/// back to a fixed lookback and never advanced.
+///
+/// It doubles as the sync observability record: a whole-repository failure is
+/// recorded here (lastError / lastErrorAt / consecutiveFailures) so that
+/// `corpus health` can distinguish "never synced" and "failing" from "idle"
+/// without needing pod logs.
+model CorpusSyncState {
+  id                  String    @id @default(uuid())
+  /// "owner/repo"
+  repository          String    @unique
+  /// ISO-8601 GitHub `updated_at` of the newest issue successfully indexed.
+  /// Null means this repository has never completed a sync.
+  lastWatermark       String?
+  /// Last time a sync was attempted, regardless of outcome.
+  lastAttemptAt       DateTime?
+  /// Last time a sync completed without a repository-level failure.
+  lastSuccessAt       DateTime?
+  /// "never" | "success" | "failed"
+  lastStatus          String    @default("never")
+  /// Repository-level failure message from the most recent failed attempt.
+  lastError           String?
+  lastErrorAt         DateTime?
+  /// Consecutive repository-level failures; reset to 0 on success.
+  consecutiveFailures Int       @default(0)
+  /// Per-issue upsert failures during the most recent attempt.
+  itemErrors          Int       @default(0)
+  /// Indexed issue count for this repository at last successful sync.
+  issueCount          Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([lastStatus])
+  @@index([lastSuccessAt])
+  @@map("corpus_sync_state")
+}
+
+// ---------------------------------------------------------------------------
+// Immutable event log
+// ---------------------------------------------------------------------------
+
+/// Append-only event stream. No UPDATE or DELETE by application code.
+/// Replay, audit, cost accounting, and SLO monitoring derive from this stream.
+model EventLog {
+  id              BigInt   @id @default(autoincrement())
+  eventId         String   @unique
+  eventType       String
+  aggregateType   String
+  aggregateId     String
+  actorId         String?
+  actorType       String   @default("system")
+  payload         Json
+  metadata        Json     @default("{}")
+  correlationId   String?
+  causationId     String?
+  version         Int      @default(1)
+  occurredAt      DateTime
+  recordedAt      DateTime @default(now())
+
+  @@index([aggregateType, aggregateId, version])
+  @@index([correlationId])
+  @@index([occurredAt])
+  @@index([eventType])
+  @@index([actorId, occurredAt])
+  @@map("event_log")
+}
+
+// ---------------------------------------------------------------------------
+// Shared contract models
+//
+// Several packages compile against the models below, so renaming or re-typing
+// a field is a cross-package change, not a local one. Field-level notes
+// explain intent that is not obvious from the name — particularly the
+// two-repo-key split on WorkItem.
+// ---------------------------------------------------------------------------
+
+// ---- Memory ----
+
+/// A discrete event worth recalling later — an approval, an assignment, an
+/// escalation, a stated preference. Written by a turn-end extraction step that
+/// is deterministic wherever the event is structured, and only falls back to
+/// the model for free-text facts.
+///
+/// Visibility: work facts are `org`-scoped and
+/// shared; anything derived from a DM or a stated personal preference is
+/// `user`-scoped and filterable only by its `subjectUserId`. Memory is
+/// advisory context, never authority — an episode can never grant a
+/// permission or satisfy a gate.
+model MemoryEpisode {
+  id             String   @id @default(uuid())
+  /// "org" | "user"
+  scope          String
+  /// Required when scope = "user"; the only principal that may recall it.
+  subjectUserId  String?
+  /// decision | assignment | escalation | preference | fact | outcome
+  kind           String
+  threadKey      String?
+  /// issue | pull_request | spec | work_item | repo
+  entityType     String?
+  entityId       String?
+  content        String
+  importance     Float    @default(0.5)
+  confidence     Float    @default(1.0)
+  /// Turn ref, tool, actor — how this episode came to be recorded.
+  provenance     Json     @default("{}")
+  expiresAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  /// The episode that replaced this one, where one did. Null means "this is
+  /// still what holds".
+  ///
+  /// Not a relation on purpose. A self-relation would oblige Prisma to enforce
+  /// referential integrity on a table the retention sweep prunes by age, so
+  /// deleting a superseded ancestor would either fail or cascade into the
+  /// current fact that replaced it. A dangling id here degrades to "superseded
+  /// by something no longer on record", which is the truth.
+  supersededById String?
+  /// When the replacement was recorded. Set together with `supersededById`;
+  /// carried separately so "when did this stop being true" is answerable
+  /// without a second read of the replacement row.
+  supersededAt   DateTime?
+  /// When the fact started holding, where that differs from when it was
+  /// recorded — a rule announced on Friday to take effect on Monday. Null
+  /// means it held from `createdAt`.
+  validFrom      DateTime?
+  /// When the fact stopped holding. Set when it is superseded.
+  validUntil     DateTime?
+
+  @@index([scope, subjectUserId])
+  @@index([threadKey])
+  @@index([entityType, entityId])
+  /// Walks the history behind a current fact ("what did this replace?").
+  /// Without it that is a sequential scan of the whole store, on a path the
+  /// renderer takes whenever it has to explain why something changed.
+  @@index([supersededById])
+  @@map("memory_episodes")
+}
+
+/// Structured working memory for one Slack thread, replacing the single
+/// prose summary that `finalizeThread` overwrote each turn. `state` holds a
+/// `ThreadState` (see @lexi/contracts); `tokenCost` is the measured size of the
+/// rendered pack so budget enforcement is observable rather than estimated.
+model ThreadStateRecord {
+  id         String   @id @default(uuid())
+  threadKey  String   @unique
+  /// ThreadState
+  state      Json
+  tokenCost  Int      @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@map("thread_states")
+}
+
+/// Semantic-memory corpus beyond issues: repo docs, approved specs and
+/// vendored skill references. `contentHash` is the L6 dedup key — identical
+/// content is never re-embedded.
+model KnowledgeChunk {
+  id           String   @id @default(uuid())
+  /// repo_doc | spec | skill_reference | issue
+  sourceType   String
+  sourceRef    String
+  repo         String?
+  content      String
+  contentHash  String
+  embedding    Unsupported("vector(1536)")?
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now())
+
+  @@unique([sourceType, sourceRef, contentHash])
+  @@index([repo])
+  @@map("knowledge_chunks")
+}
+
+// ---- Cost ----
+
+/// Per-turn spend, for `/lexi diag cost` and the Prometheus counters.
+/// The ledger observes; it never blocks. No request is refused, downgraded or
+/// truncated on account of a row in this table: cost is measured, not enforced, here.
+model CostLedger {
+  id                String   @id @default(uuid())
+  threadKey         String?
+  userId            String?
+  model             String
+  intentClass       String?
+  inputTokens       Int      @default(0)
+  cachedInputTokens Int      @default(0)
+  /// Tokens written to the prompt cache, billed at 1.25x input — the most
+  /// expensive input there is. Without it they would be left out of the
+  /// hit-rate denominator and every reported rate would be optimistic.
+  /// Rows written before the column default to 0 and read as they always did.
+  cacheCreationInputTokens Int @default(0)
+  outputTokens      Int      @default(0)
+  toolCount         Int      @default(0)
+  estimatedCostUsd  Float    @default(0)
+  createdAt         DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([threadKey])
+  @@index([userId, createdAt])
+  @@map("cost_ledger")
+}
+
+// ---- Work items ----
+
+/// A unit of work that is not necessarily a bug. Deliberately separate from
+/// the 20-state bug workflow: work items *reference* that machine, they do not
+/// replace it.
+///
+/// Two repo keys, on purpose. A bug is tracked in `issues` while its
+/// code lands in a product repo, so `trackingRepoKey` and `codeRepoKey` differ.
+/// For a spec they are the same product repo. Collapsing them into one field is
+/// what would force specs into the bug corpus.
+model WorkItem {
+  id             String   @id @default(uuid())
+  /// bug | feature | chore | spec
+  kind           String
+  /// epic -> task
+  parentId       String?
+  title          String
+  /// PROPOSED | CLARIFYING | SPECED | TASKED | IN_PROGRESS | DELIVERED | VERIFIED | CANCELLED
+  status         String
+  /// repos.yaml key with role=code — where the change lands. Resolved from the
+  /// dispatch target's organization/repository via the repo registry, never
+  /// derived from it by string transform. Null when that slug matches no
+  /// registry entry, or matches one lacking the code role: both are config
+  /// gaps, and `metadata.codeRepoKeyStatus` says which, so a null here is
+  /// queryable rather than merely absent.
+  codeRepoKey    String?
+  /// repos.yaml key with role=issues — where the issue lives.
+  trackingRepoKey String?
+  /// GitHub issue backing this item, in trackingRepoKey.
+  issueNumber    Int?
+  specId         String?
+  boardItemId    String?
+  assigneeGithub String?
+  assigneeSlack  String?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  parent         WorkItem?  @relation("work_item_parent", fields: [parentId], references: [id])
+  children       WorkItem[] @relation("work_item_parent")
+
+  @@index([kind, status])
+  @@index([codeRepoKey])
+  @@map("work_items")
+}
+
+// ---- Spec pipeline ----
+
+/// One clarification session per thread. `coverage` holds a machine-readable
+/// `CoverageRecord` so `isReadyToDraft()` is a deterministic check rather than
+/// a model judgement, and so a covered dimension is never re-asked.
+model SpecSession {
+  id            String   @id @default(uuid())
+  /// Historical sessions share a Slack thread when an approved spec is
+  /// superseded. Runtime queries select the latest non-superseded session.
+  threadKey     String
+  requestedBy   String
+  targetRepoKey String?
+  /// DRAFTING | DRAFT_READY | IN_REVIEW | APPROVED | CHANGES_REQUESTED | REJECTED | SUPERSEDED
+  status        String
+  /// CoverageRecord
+  coverage      Json     @default("{}")
+  questionTurns Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("spec_sessions")
+  @@index([threadKey])
+}
+
+/// The spec itself, mirrored from its GitHub issue. `contentHash` per revision
+/// means replay never depends on GitHub state.
+model SpecDocument {
+  id             String   @id @default(uuid())
+  sessionId      String?
+  /// Where the spec issue lives.
+  trackingRepoKey String
+  /// Which product the spec governs.
+  codeRepoKey    String?
+  issueNumber    Int?
+  revision       Int      @default(1)
+  status         String
+  frontmatter    Json     @default("{}")
+  body           String
+  contentHash    String
+  /// low | medium | high | critical. Classified deterministically by
+  /// classifySpecRisk() from the coverage record — no model participates, so
+  /// the same coverage always yields the same tier.
+  ///
+  /// Held per REVISION, not per session, because the tier is rendered into the
+  /// frontmatter and therefore hashed: it is a property of the document the
+  /// reviewer actually read, and evaluateSpecGate must judge that document
+  /// rather than whatever the session has since become.
+  ///
+  /// NULL means unclassified, and must stay NULL. evaluateSpecGate substitutes
+  /// `approval.defaultRiskTier` (high) for an absent tier and applies the
+  /// two-person rule — so a gap is governed MORE strictly, not less. Never
+  /// backfill this column with a guess, least of all 'low'.
+  ///
+  /// Not mirrored onto SpecSession on purpose: a session's tier is a pure
+  /// function of SpecSession.coverage and can be re-derived at any time, so
+  /// storing it would be derived state free to drift from the answers it came
+  /// from — the same failure mode as the createdAt bug this pipeline already had.
+  riskTier       String?
+  approvedBy     String?
+  approvedAt     DateTime?
+  supersededById String?
+  createdAt      DateTime @default(now())
+  /// Revision ledger — sections that moved vs the previous
+  /// revision. Array of `{ id, heading, kind }` (`added` | `removed` |
+  /// `changed`). Bodies are omitted: they can be arbitrarily long, and the
+  /// document already has them. Empty on the first revision.
+  changedSections Json     @default("[]")
+  /// Real evidence URLs that justified this revision. Array of
+  /// `{ href, label?, kind? }`. `href` is an http(s) URL — never the
+  /// literal string `"thread"`.
+  evidenceLinks   Json     @default("[]")
+  /// Named owners of open questions / constraints. Array of
+  /// `{ role, name, slackUserId? }`.
+  owners          Json     @default("[]")
+
+  @@index([sessionId])
+  @@map("spec_documents")
+}
+
+/// Human approval trail. `approve_spec` is withheld from the model payload
+/// entirely — only a human Slack interaction writes an `approve` row.
+model SpecApproval {
+  id           String   @id @default(uuid())
+  specId       String
+  revision     Int
+  actorSlackId String
+  /// approve | request_changes | reject
+  action       String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  @@index([specId])
+  @@map("spec_approvals")
+}
+
+// ---- Escalation ----
+
+/// Where a subject currently sits on the reminder ladder, and whether anyone
+/// has acknowledged. One row per subject so re-notification is deduped.
+/// Lexi holds no DM scope, so the ladder escalates by who is @-mentioned in
+/// the platform team channel rather than by messaging anyone directly; only
+/// the terminal GOVERNANCE rung changes destination.
+model EscalationLadderState {
+  id            String   @id @default(uuid())
+  /// Namespace for the ladder this row belongs to. Free-form, and shared by
+  /// more than one service — `@@unique([subjectType, subjectId])` means two
+  /// services using the same value share one row.
+  ///
+  /// EscalationLadderService: work_item | issue | pull_request
+  /// ProgressCheckService:    issue:progress
+  ///
+  /// The `issue:progress` namespace is deliberate. Both services track
+  /// issues, but with disjoint rung vocabularies (see `rung` below); sharing
+  /// `issue` made each one read rungs the other wrote, and the progress
+  /// check scored an unknown rung as -1, which read as "escalate now" and
+  /// bypassed its own cooldown on every sweep. Keep new subject types
+  /// disjoint — a service that reuses another's value inherits its rows.
+  subjectType   String
+  subjectId     String
+  /// Rung vocabulary depends on `subjectType` above — they are separate
+  /// ladders, not one shared scale:
+  ///   work_item | issue | pull_request → PIC | TEAM_LEAD | MANAGER | GOVERNANCE
+  ///   issue:progress                   → REMINDER | ESCALATION
+  rung          String
+  lastNotifiedAt DateTime
+  ackedAt       DateTime?
+  ackedBy       String?
+  notifyCount   Int      @default(0)
+
+  @@unique([subjectType, subjectId])
+  @@map("escalation_ladder_state")
+}
+
+/// Derived people directory (CODEOWNERS + Slack), reconciling ownership.yaml
+/// and quick-fix-owners.yaml into one model. `managerGithub` is retained
+/// and now consumed: it supplies the MANAGER rung above a team lead. Startup
+/// validation rejects placeholder data.
+model PersonDirectory {
+  id            String   @id @default(uuid())
+  githubLogin   String   @unique
+  slackId       String?
+  displayName   String?
+  /// Manual override source.
+  managerGithub String?
+  teams         String[] @default([])
+  /// derived | override
+  source        String   @default("derived")
+  updatedAt     DateTime @updatedAt
+
+  @@map("person_directory")
+}
+
+// ---------------------------------------------------------------------------
+// Rebuild programmes. Status vocabularies and legal transitions live in
+// packages/programme/src/*-state-machine.ts — the database stores, the
+// machines decide.
+// ---------------------------------------------------------------------------
+
+/// A rebuild programme: one product rebuilt in a dedicated agent-owned
+/// repository (`autonomyTier: autonomous` in repos.yaml), as milestones of
+/// build tasks.
+model AppRebuildProgramme {
+  id           String   @id @default(uuid())
+  /// Human-addressable slug, e.g. "acme-web-rebuild". Also the suffix of the
+  /// programme's hardening findings label (`hardening_<key>`).
+  key          String   @unique
+  title        String
+  status       String   @default("PROPOSED")
+  /// repos.yaml key of the rebuild repo. Must be `autonomyTier: autonomous`
+  /// AND listed in programme-policy.yaml programmes.allowedRepoKeys.
+  targetRepoKey String
+  platform     String?
+  /// The product-spec document seeding the programme: a GitHub issue.
+  sourceSpecRepoKey     String?
+  sourceSpecIssueNumber Int?
+  /// Figma prototype file keys the rebuild implements.
+  figmaFileKeys Json     @default("[]")
+  /// Latest DesignContextDocument captured for this programme, if any.
+  designContextId String?
+  /// Programme-level APPROVED SpecDocument (milestones may derive from it).
+  specId        String?
+  /// repos.yaml key of the existing production app — the parity floor.
+  referenceRepoKey String?
+  pausedReason  String?
+  createdBy     String?
+  /// Working branch, tracking issue, originating thread and recorded decisions.
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@map("app_rebuild_programmes")
+}
+
+/// One milestone of a rebuild programme. Each milestone may be governed by its
+/// own SpecDocument (specId), approved through the human-only spec flow; the
+/// milestone's own APPROVED state is the separate, later evidence sign-off
+/// (a Block Kit click, `programme.milestone.approve`).
+model ProgrammeMilestone {
+  id           String   @id @default(uuid())
+  programmeId  String
+  ordinal      Int
+  title        String
+  status       String   @default("PENDING")
+  /// SpecDocument.id of the milestone-scoped spec, once drafted.
+  specId       String?
+  reviewChannel  String?
+  reviewThreadTs String?
+  approvedBy   String?
+  approvedAt   DateTime?
+  /// QuickFixAttempt id of the exploratory sweep judging this milestone's head.
+  sweepAttemptId String?
+  sweepHeadSha   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([programmeId, ordinal])
+  @@index([programmeId, status])
+  @@map("programme_milestones")
+}
+
+/// One node of a milestone's task DAG. `dependsOn` holds sibling BuildTask
+/// ids; readiness is computed by packages/programme/src/task-graph.ts, never
+/// by SQL. `currentAttemptId` points at the QuickFixAttempt row whose id is
+/// on the wire to programme-build.yml and echoed in every evidence bundle.
+model BuildTask {
+  id           String   @id
+  programmeId  String
+  milestoneId  String
+  title        String
+  status       String   @default("PENDING")
+  dependsOn    String[] @default([])
+  codeRepoKey  String
+  acceptanceCriterionIds String[] @default([])
+  designContextNodeIds   String[] @default([])
+  /// Dispatch attempts consumed. HANDBACK/FAILED -> READY is refused by the
+  /// advance job once this reaches programme-policy dispatch.maxTaskAttempts.
+  attempts     Int      @default(0)
+  currentAttemptId String?
+  prNumber     Int?
+  mergedSha    String?
+  /// Latest AutoMergeVerdict (allowed or not) — evidence for the reviewer even
+  /// when no human is in the loop.
+  lastMergeVerdict Json?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([programmeId, status])
+  @@index([milestoneId, status])
+  @@map("build_tasks")
+}
+
+/// A durable, SELF-CONTAINED snapshot of a Figma prototype: text, structure
+/// and token names captured verbatim; imagery described, never linked — the
+/// build runner has no Figma access and Figma URLs expire. A re-snapshot is a
+/// new version, not an edit.
+model DesignContextDocument {
+  id           String   @id @default(uuid())
+  figmaFileKey String
+  version      Int
+  capturedAt   DateTime @default(now())
+  /// DesignContextState[] as JSON (packages/contracts/src/design-context.ts).
+  content      Json
+  /// Design-system component catalogue, mobile programmes only.
+  componentCatalogue Json?
+
+  @@unique([figmaFileKey, version])
+  @@map("design_context_documents")
+}
+
+/// A versioned, FILTERED snapshot of the backend OpenAPI document — the
+/// endpoint allowlist build briefs reference. Archived, admin and internal
+/// operations are removed before storage; a build agent must not see what it
+/// must not call.
+model ApiContractDocument {
+  id                     String   @id
+  sourceRepoSlug         String
+  sourcePath             String
+  /// Git blob SHA at capture — the dedupe key; unchanged source, no new row.
+  sourceSha              String
+  version                Int
+  capturedAt             DateTime @default(now())
+  info                   Json
+  /// ApiContractOperation[] (packages/contracts/src/api-contract.ts).
+  operations             Json
+  excludedOperationCount Int      @default(0)
+  spec                   Json
+
+  @@unique([sourceRepoSlug, sourcePath, version])
+  @@map("api_contract_documents")
+}
+
+/// Structural inventory of the EXISTING production app a rebuild replaces:
+/// routes, screens, flags, events, dependencies. The parity FLOOR a brief
+/// carries — the rebuild must match or exceed it.
+model ParityInventoryDocument {
+  id               String   @id
+  referenceRepoSlug String
+  ref              String
+  /// Tree fingerprint at capture — the dedupe key.
+  headSha          String
+  version          Int
+  capturedAt       DateTime @default(now())
+  platform         String
+  /// The rest of ParityInventoryDocument (packages/contracts/src/parity-inventory.ts).
+  content          Json
+
+  @@unique([referenceRepoSlug, version])
+  @@map("parity_inventory_documents")
+}
+
+/// Structured evidence pushed back by a dispatched build run.
+///
+/// The runner is the only party that can see the RED phase — a failing test
+/// and its output exist mid-run and are gone by the time the run ends, so a
+/// terminal log marker cannot carry them. Bundles arrive as they are produced
+/// and are APPEND-ONLY: several rows per attempt, none superseding another.
+/// Collapsing to a single "latest evidence" record would discard the ordering
+/// that distinguishes a test which failed before it passed from one written
+/// afterwards.
+///
+/// UNTRUSTED. Every row is what a runner *claimed*, authenticated by a bearer
+/// token but not verified against the run itself. `receivedAt` is the store's
+/// own clock, deliberately not the sender's `reportedAt`: an audit trail
+/// ordered by a timestamp the sender controls is one the sender can reorder.
+model RunEvidenceRecord {
+  id            String   @id @default(uuid())
+  /// Stable identity derived from the bundle's own content. A runner both
+  /// POSTs each bundle and uploads it as a run artifact, so the same evidence
+  /// legitimately arrives twice; this key stores it once. Excludes the
+  /// sender's `reportedAt`, which can differ between the two copies.
+  bundleKey     String   @unique
+  /// `QuickFixAttempt.id`, echoed back from the dispatch input. Validated on
+  /// ingest — an unknown id is rejected rather than stored.
+  attemptId     String
+  /// red | green | refactor | checks
+  phase         String
+  workflowRunId String?
+  commitSha     String?
+  /// RunCheckResult[] — named check results as reported.
+  checks        Json     @default("[]")
+  /// FailingTestProof[] — the RED-phase claim and its failure output.
+  failingTests  Json     @default("[]")
+  /// RunEvidenceArtifact[] — URIs recorded, never dereferenced at ingest.
+  artifacts     Json     @default("[]")
+  /// Sender-supplied, advisory only.
+  reportedAt    DateTime?
+  /// Authoritative receipt time.
+  receivedAt    DateTime @default(now())
+
+  @@index([attemptId, receivedAt])
+  @@index([attemptId, phase])
+  @@map("run_evidence_records")
+}
+
+// ---------------------------------------------------------------------------
+// Runtime access grants — not part of the shared contract models above.
+//
+// Role *definitions* stay in config/authorization.yaml (baked into the image).
+// These tables hold *assignments* approved in Slack, so a new team_lead does
+// not require a YAML edit + image rebuild. YAML users still win: Slack cannot
+// demote or replace a baked platform_admin, and cannot grant platform_admin.
+// ---------------------------------------------------------------------------

@@ -1,0 +1,21 @@
+{
+  "name": "@lexi/agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The agent runtime: a tool-calling loop, a fail-closed tool registry, context budgeting and LLM clients",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@lexi/contracts": "*",
+    "@lexi/privacy": "*",
+    "openai": "^4.55.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

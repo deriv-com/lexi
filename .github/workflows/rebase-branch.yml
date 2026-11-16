@@ -1,0 +1,204 @@
+# rebase-branch.yml — rebase one agent branch onto its base, as a reusable workflow.
+#
+# Called when an agent's PR has fallen behind its base branch (for example
+# because a sibling PR merged first). It does one thing: rebase, and either
+# force-push with lease or report a conflict. It never resolves a conflict
+# itself; that is a code change, and code changes go through agent-fix.yml.
+#
+# Result, as the `result` output and as a `REBASE_RESULT:` line in the log:
+#   REBASED          the branch was rebased and pushed
+#   ALREADY_CURRENT  the branch already contained the base; nothing pushed
+#   CONFLICT         the rebase stopped on a conflict; nothing pushed
+#   HANDBACK         anything else went wrong (bad input, push refused)
+#
+# A push made with the default GITHUB_TOKEN does not trigger other workflows,
+# so the rebased PR would never get CI. Pass a GitHub App's credentials
+# (app_id + app_private_key) to push as the App instead.
+#
+# Every input reaches a shell through `env:`, never through `${{ }}` inside
+# `run:`, so a branch name cannot inject a command.
+
+name: Rebase branch
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: Branch to rebase. Must start with one of allowed_prefixes.
+        required: true
+        type: string
+      onto:
+        description: Base branch to rebase onto. Empty means the repository's default branch.
+        required: false
+        type: string
+        default: ""
+      allowed_prefixes:
+        description: Space-separated branch prefixes this workflow may rewrite.
+        required: false
+        type: string
+        default: lexi/
+      protected_branches:
+        description: Space-separated branch names that are never rewritten, whatever their prefix.
+        required: false
+        type: string
+        default: main master develop qa staging production
+      runs_on:
+        description: JSON for runs-on, e.g. '"ubuntu-latest"' or '["self-hosted","linux"]'.
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
+      git_user_name:
+        description: Committer name for rewritten commits.
+        required: false
+        type: string
+        default: Lexi Agent
+      git_user_email:
+        description: Committer email for rewritten commits.
+        required: false
+        type: string
+        default: lexi-agent@users.noreply.github.com
+    secrets:
+      app_id:
+        description: GitHub App ID. Optional; with app_private_key, pushes trigger CI.
+        required: false
+      app_private_key:
+        description: GitHub App private key (PEM).
+        required: false
+    outputs:
+      result:
+        description: REBASED, ALREADY_CURRENT, CONFLICT or HANDBACK
+        value: ${{ jobs.rebase.outputs.result }}
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 15
+    env:
+      # `secrets` is not available in a step's `if:`; a job env var is.
+      HAS_APP: ${{ secrets.app_id != '' && secrets.app_private_key != '' }}
+    outputs:
+      result: ${{ steps.publish.outputs.result }}
+    steps:
+      - name: Seed result
+        run: echo "HANDBACK" > /tmp/rebase-result
+
+      - name: Validate inputs
+        env:
+          BRANCH: ${{ inputs.branch }}
+          ONTO: ${{ inputs.onto }}
+          ALLOWED_PREFIXES: ${{ inputs.allowed_prefixes }}
+          PROTECTED_BRANCHES: ${{ inputs.protected_branches }}
+        run: |
+          set -euo pipefail
+          valid_ref() {
+            [ -n "$1" ] && git check-ref-format --branch "$1" >/dev/null 2>&1
+          }
+          if ! valid_ref "$BRANCH"; then
+            echo "::error::branch is not a valid branch name"
+            exit 1
+          fi
+          if [ -n "$ONTO" ] && ! valid_ref "$ONTO"; then
+            echo "::error::onto is not a valid branch name"
+            exit 1
+          fi
+          for protected in $PROTECTED_BRANCHES; do
+            if [ "$BRANCH" = "$protected" ]; then
+              echo "::error::refusing to rewrite protected branch ${BRANCH}"
+              exit 1
+            fi
+          done
+          case "$BRANCH" in release/*|release-*|hotfix/*)
+            echo "::error::refusing to rewrite release branch ${BRANCH}"
+            exit 1
+            ;;
+          esac
+          allowed=false
+          for prefix in $ALLOWED_PREFIXES; do
+            case "$BRANCH" in "$prefix"*) allowed=true ;; esac
+          done
+          if [ "$allowed" != true ]; then
+            echo "::error::branch ${BRANCH} does not start with an allowed prefix (${ALLOWED_PREFIXES})"
+            exit 1
+          fi
+
+      # Only pushes the rebased branch: contents, nothing else. A branch whose
+      # commits change .github/workflows/ cannot be pushed with it (that needs
+      # the workflows permission, which this App must not have): the push is
+      # refused and the run reports HANDBACK.
+      - name: Mint App token
+        id: app-token
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.app_id }}
+          private-key: ${{ secrets.app_private_key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Check out branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Rebase
+        env:
+          BRANCH: ${{ inputs.branch }}
+          ONTO: ${{ inputs.onto }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GIT_USER_NAME: ${{ inputs.git_user_name }}
+          GIT_USER_EMAIL: ${{ inputs.git_user_email }}
+        run: |
+          set -euo pipefail
+          BASE="${ONTO:-$DEFAULT_BRANCH}"
+          if [ -z "$BASE" ]; then
+            BASE=$(git remote show origin | sed -n 's/.*HEAD branch: //p')
+          fi
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+          git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+
+          if git merge-base --is-ancestor "origin/${BASE}" HEAD; then
+            echo "ALREADY_CURRENT" > /tmp/rebase-result
+            echo "${BRANCH} already contains ${BASE}."
+            exit 0
+          fi
+
+          BEFORE=$(git rev-parse HEAD)
+          if ! git rebase "origin/${BASE}"; then
+            git diff --name-only --diff-filter=U > /tmp/rebase-conflicts.txt || true
+            git rebase --abort || true
+            echo "CONFLICT" > /tmp/rebase-result
+            echo "Rebase of ${BRANCH} onto ${BASE} stopped on a conflict in:"
+            sed 's/^/  - /' /tmp/rebase-conflicts.txt
+            exit 0
+          fi
+
+          # Lease on the commit we checked out: if anyone pushed to the branch
+          # since, the push is refused rather than overwriting their work.
+          if git push --force-with-lease="refs/heads/${BRANCH}:${BEFORE}" origin "HEAD:refs/heads/${BRANCH}"; then
+            echo "REBASED" > /tmp/rebase-result
+          else
+            echo "::error::push refused; the branch moved while rebasing"
+          fi
+
+      - name: Publish result
+        id: publish
+        if: always()
+        run: |
+          RESULT=$(cat /tmp/rebase-result 2>/dev/null || echo HANDBACK)
+          echo "REBASE_RESULT: ${RESULT}"
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Rebase result: ${RESULT}"
+            if [ -s /tmp/rebase-conflicts.txt ]; then
+              echo
+              echo "Conflicting files:"
+              sed 's/^/- /' /tmp/rebase-conflicts.txt
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

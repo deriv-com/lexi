@@ -1,0 +1,55 @@
+# Work-item policy for the fictional "Acme" organisation.
+#
+# Bugs, features, chores and specs share one governance chassis (action classes,
+# budgets, the mutation guard). What differs per kind is the vocabulary: what
+# must be present before an item may be dispatched, and what protects it from
+# automation. Every default in the loader refuses; this file only relaxes what
+# Acme has decided to relax.
+
+version: "1.0.0"
+# Off until the work-item pipeline is wired in. Flags default off.
+enabled: false
+
+workItems:
+  kinds: [bug, feature, chore, spec]
+  # Lifecycle order. Must match the work-item state machine.
+  statuses:
+    - PROPOSED
+    - CLARIFYING
+    - SPECED
+    - TASKED
+    - IN_PROGRESS
+    - DELIVERED
+    - VERIFIED
+    - CANCELLED
+  initialStatus: PROPOSED
+  terminalStatuses: [VERIFIED, CANCELLED]
+
+dispatch:
+  # A feature never reaches a code-writing workflow without an approved spec.
+  requireApprovedSpecForFeature: true
+  requireTargetForChore: true
+  requireDesignSkillForUiTasks: true
+  # When no rule matches a request: a human decides. "allow" is not an option.
+  noPolicyMatchAction: human_review
+
+verification:
+  featureVerifiedBy: deployment_record
+  bugVerifiedBy: retest
+  requireAllLinkedPrsMerged: true
+  # Reports spec drift to a human; never blocks a pull request or a deploy.
+  specConformanceEnabled: false
+
+vocabulary:
+  requiredFields:
+    # Only a bug is reproduced. Asking a chore for reproduction leaves a caller
+    # a refusal it can never satisfy, or a false claim.
+    bug: [reproduction]
+    feature: [specId, acceptanceCriteria]
+    chore: [target, definitionOfDone]
+    spec: [problem]
+  neverTouchPredicates:
+    bug: [hasRecentHumanActivity, hasOpenLinkedPR, isExplicitlyAssigned]
+    feature: [hasRecentHumanActivity, hasOpenLinkedPR, hasDependentWorkItems]
+    chore: [hasRecentHumanActivity, hasOpenLinkedPR]
+    spec: [hasRecentHumanActivity, hasDependentWorkItems]

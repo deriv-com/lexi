@@ -1,0 +1,108 @@
+# Copy into your product repository as .github/workflows/app-build.yml.
+#
+# A thin caller: the loop lives in the reusable workflow in this project
+# (github.com/deriv-com/lexi). One run is one session of the builder; with
+# `chain: "true"` the reusable workflow starts the next session itself by
+# dispatching this file again, so the caller needs actions:write.
+#
+# Before the first run:
+#   1. Add `app/web/BUILD.md` (or `app/mobile/BUILD.md`): what to build and how.
+#   2. Create a GitHub App for this workflow alone (not the App Lexi's server
+#      uses) with contents, pull requests and issues write and no Actions write
+#      or Workflows permission (Checks and Actions read are optional: they let
+#      the builder see the PR's failing checks). Install it only on this
+#      repository and the source repositories the build reads, and store its
+#      ID and key as APP_BUILD_APP_ID and APP_BUILD_APP_PRIVATE_KEY. Each token
+#      the workflow mints asks for only what its step needs (docs/app-build.md).
+#   3. Store the model token as APP_BUILD_MODEL_TOKEN and set `model_base_url`.
+#   4. Set the repository variable LEXI_APP_BUILD_ENABLED to "true".
+#
+# Pin `uses:` to a release tag or commit SHA rather than @main once one exists,
+# and set `lexi_ref` to the same ref so the scripts match the workflow.
+
+name: app-build
+# Naming the app and the cap in the run title lets a chat integration tell the
+# web and mobile builds apart and read max_sessions (packages/app-build).
+run-name: app-build ${{ inputs.app }}${{ inputs.track != '' && format(' {0}', inputs.track) || '' }} session ${{ inputs.session }} (max ${{ inputs.max_sessions }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: web or mobile
+        required: true
+        type: choice
+        options: [web, mobile]
+      session:
+        description: Session number (1 to start)
+        required: false
+        default: "1"
+        type: string
+      track:
+        description: Optional track name (see BUILD.md "Tracks")
+        required: false
+        default: ""
+        type: string
+      # The next session is dispatched with these too, so keep all of them.
+      max_sessions:
+        description: Stop after this many sessions
+        required: false
+        default: "20"
+        type: string
+      stop_at_phase:
+        description: Optional phase to stop at (spec, plan or build)
+        required: false
+        default: ""
+        type: string
+      # Only the first session of a restart passes this; the next session is
+      # dispatched without it.
+      restart_phase:
+        description: Optional phase to rewind to (intent, spec, plan or build)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: deriv-com/lexi/.github/workflows/app-build.yml@main
+    # GITHUB_TOKEN ceilings: the builder reads the PR with it, and `chain`
+    # dispatches the next session with actions:write. Pushes, PRs and comments
+    # use App tokens, not this one.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: write
+    with:
+      app: ${{ inputs.app }}
+      session: ${{ inputs.session }}
+      track: ${{ inputs.track }}
+      app_label: Acme Markets
+      model_base_url: https://api.anthropic.com
+      model: claude-opus-5-5
+      phases: "true"
+      max_sessions: ${{ inputs.max_sessions }}
+      stop_at_phase: ${{ inputs.stop_at_phase }}
+      restart_phase: ${{ inputs.restart_phase }}
+      segments: "3"
+      chain: "true"
+      caller_workflow: app-build.yml
+      branch_prefix: lexi/build-
+      # Whose PR comments and reviews the builder acts on. Name the people:
+      # "*" admits any repository owner, member or collaborator.
+      feedback_authors: "acme-lead,acme-designer"
+      # Exact versions; change them deliberately.
+      # claude_code_version: 2.1.319
+      # playwright_mcp_version: 0.0.84
+      lexi_ref: main
+    secrets:
+      app_id: ${{ secrets.APP_BUILD_APP_ID }}
+      app_private_key: ${{ secrets.APP_BUILD_APP_PRIVATE_KEY }}
+      model_token: ${{ secrets.APP_BUILD_MODEL_TOKEN }}
+      # Optional:
+      # slack_webhook_url: ${{ secrets.APP_BUILD_SLACK_WEBHOOK_URL }}
+      # staging_test_email: ${{ secrets.STAGING_TEST_EMAIL }}
+      # staging_test_password: ${{ secrets.STAGING_TEST_PASSWORD }}

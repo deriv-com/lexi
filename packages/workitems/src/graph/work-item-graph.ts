@@ -1,0 +1,182 @@
+import type { WorkItemStatus } from "@lexi/contracts";
+import { ALL_WORK_ITEM_STATUSES, WorkItemStateMachine } from "../work-item-state-machine";
+
+/**
+ * Derives the work-item lifecycle graph from the **live** state machine rather
+ * than a hand-maintained copy — the same pattern as
+ * `packages/workflows/src/graph/workflow-graph.ts`, for the same reason: a
+ * hand-drawn diagram silently drifts from the adjacency list it claims to
+ * describe, and doc drift already caused one real bug.
+ *
+ * `assertWorkItemGraphInSync` (via the drift spec) fails the build when the
+ * committed `WORK_ITEM_LIFECYCLE.md` falls behind `TRANSITIONS`.
+ */
+
+export interface WorkItemGraphEdge {
+  from: WorkItemStatus;
+  to: WorkItemStatus;
+}
+
+export interface WorkItemGraph {
+  states: WorkItemStatus[];
+  edges: WorkItemGraphEdge[];
+  terminalStates: WorkItemStatus[];
+  /**
+   * States reachable from (nearly) every other state — `CANCELLED` in v1.
+   * Drawing all inbound edges for these produces a hairball, so they are
+   * summarized in a note instead.
+   */
+  universalTargets: WorkItemStatus[];
+  /** States that can restart a fresh cycle by returning to PROPOSED. */
+  revivableStates: WorkItemStatus[];
+}
+
+/** A target is "universal" when at least this fraction of states can reach it. */
+const UNIVERSAL_TARGET_THRESHOLD = 0.6;
+
+export function buildWorkItemGraph(machine = new WorkItemStateMachine()): WorkItemGraph {
+  const states = [...ALL_WORK_ITEM_STATUSES];
+  const edges: WorkItemGraphEdge[] = [];
+  const inboundCount = new Map<WorkItemStatus, number>();
+
+  for (const from of states) {
+    for (const to of machine.nextStates(from)) {
+      edges.push({ from, to });
+      inboundCount.set(to, (inboundCount.get(to) ?? 0) + 1);
+    }
+  }
+
+  const universalTargets = states.filter(
+    (state) => (inboundCount.get(state) ?? 0) >= states.length * UNIVERSAL_TARGET_THRESHOLD,
+  );
+
+  const terminalStates = states.filter((state) => machine.isTerminal(state));
+
+  // Uses nextStates (not canTransition) because canTransition short-circuits
+  // `from === to` to true, which would list PROPOSED as trivially revivable.
+  const revivableStates = states.filter((state) => machine.nextStates(state).includes("PROPOSED"));
+
+  return { states, edges, terminalStates, universalTargets, revivableStates };
+}
+
+/**
+ * Renders the graph as a Mermaid flowchart. Universal targets (CANCELLED) are
+ * declared but their inbound edges are summarized in text, keeping the diagram
+ * legible while remaining accurate.
+ */
+export function renderWorkItemMermaid(graph: WorkItemGraph = buildWorkItemGraph()): string {
+  const lines: string[] = [];
+  lines.push("```mermaid");
+  lines.push("flowchart TD");
+
+  const universal = new Set(graph.universalTargets);
+  const terminal = new Set(graph.terminalStates);
+
+  for (const edge of graph.edges.filter((edge) => !universal.has(edge.to))) {
+    lines.push(`    ${edge.from} --> ${edge.to}`);
+  }
+
+  if (graph.universalTargets.length > 0) {
+    lines.push("");
+    for (const target of graph.universalTargets) {
+      lines.push(`    ${target}["${target}<br/>(reachable from nearly every state)"]`);
+    }
+  }
+
+  if (terminal.size > 0) {
+    lines.push("");
+    for (const state of graph.terminalStates) {
+      lines.push(`    class ${state} terminalState;`);
+    }
+    lines.push("    classDef terminalState stroke-width:3px;");
+  }
+
+  lines.push("```");
+  return lines.join("\n");
+}
+
+/** Human-readable summary of the facts the diagram deliberately omits. */
+export function renderWorkItemGraphNotes(graph: WorkItemGraph = buildWorkItemGraph()): string {
+  const lines: string[] = [];
+  lines.push(
+    `- **${graph.states.length} states**, **${graph.edges.length} legal transitions** (guarded by \`WorkItemStateMachine.assertTransition\`).`,
+  );
+  if (graph.universalTargets.length > 0) {
+    lines.push(
+      `- ${graph.universalTargets
+        .map((s) => `\`${s}\``)
+        .join(" and ")} is reachable from every non-terminal state and is drawn without inbound edges for legibility.`,
+    );
+  }
+  lines.push(`- Terminal states: ${graph.terminalStates.map((s) => `\`${s}\``).join(", ")}.`);
+  lines.push(
+    `- Revivable states (restart the lifecycle at \`PROPOSED\`): ${graph.revivableStates
+      .map((s) => `\`${s}\``)
+      .join(", ")}.`,
+  );
+  lines.push(
+    "- This machine is **separate from** the 20-state bug workflow in `packages/workflows`. A bug work item *references* a workflow execution; it does not inherit its states.",
+  );
+  return lines.join("\n");
+}
+
+export const WORK_ITEM_GRAPH_BEGIN_MARKER = "<!-- BEGIN GENERATED WORK ITEM GRAPH -->";
+export const WORK_ITEM_GRAPH_END_MARKER = "<!-- END GENERATED WORK ITEM GRAPH -->";
+
+/** The full marker-delimited block written into WORK_ITEM_LIFECYCLE.md. */
+export function renderWorkItemGraphSection(graph: WorkItemGraph = buildWorkItemGraph()): string {
+  return [
+    WORK_ITEM_GRAPH_BEGIN_MARKER,
+    "",
+    "<!-- Generated by `npm run graph:workitem -w @lexi/workitems`. Do not edit by hand — edit",
+    "     TRANSITIONS in packages/workitems/src/work-item-state-machine.ts and regenerate. -->",
+    "",
+    renderWorkItemMermaid(graph),
+    "",
+    renderWorkItemGraphNotes(graph),
+    "",
+    WORK_ITEM_GRAPH_END_MARKER,
+  ].join("\n");
+}
+
+export interface WorkItemGraphSyncResult {
+  inSync: boolean;
+  reason?: string;
+  updatedContent?: string;
+}
+
+/**
+ * Replaces the marker-delimited region of `markdown` with a freshly generated
+ * section. Used both by the generator script (to write) and the drift test
+ * (to compare) so the two can never disagree about what "in sync" means.
+ */
+export function applyWorkItemGraphSection(
+  markdown: string,
+  graph: WorkItemGraph = buildWorkItemGraph(),
+): WorkItemGraphSyncResult {
+  const beginIndex = markdown.indexOf(WORK_ITEM_GRAPH_BEGIN_MARKER);
+  const endIndex = markdown.indexOf(WORK_ITEM_GRAPH_END_MARKER);
+
+  if (beginIndex === -1 || endIndex === -1) {
+    return {
+      inSync: false,
+      reason: `Missing ${WORK_ITEM_GRAPH_BEGIN_MARKER} / ${WORK_ITEM_GRAPH_END_MARKER} markers.`,
+    };
+  }
+  if (endIndex < beginIndex) {
+    return { inSync: false, reason: "Work item graph end marker appears before the begin marker." };
+  }
+
+  const before = markdown.slice(0, beginIndex);
+  const after = markdown.slice(endIndex + WORK_ITEM_GRAPH_END_MARKER.length);
+  const updatedContent = `${before}${renderWorkItemGraphSection(graph)}${after}`;
+
+  return {
+    inSync: updatedContent === markdown,
+    reason:
+      updatedContent === markdown
+        ? undefined
+        : "Generated work item graph differs from the committed doc.",
+    updatedContent,
+  };
+}

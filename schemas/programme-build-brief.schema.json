@@ -1,0 +1,364 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/deriv-com/lexi/schemas/programme-build-brief.schema.json",
+  "title": "BuildTaskBrief",
+  "description": "The structured build brief fetched by the rebuild repo's runner from GET /api/programme/briefs/:attemptId (bearer brief_token). Mirrors packages/contracts/src/programme.ts, briefVersion 1.",
+  "type": "object",
+  "required": [
+    "briefVersion",
+    "attemptId",
+    "attempt",
+    "buildTaskId",
+    "taskKind",
+    "programmeKey",
+    "milestone",
+    "spec",
+    "acceptanceCriteria",
+    "fileManifestHints",
+    "dependencies",
+    "constraints",
+    "trustedInstruction"
+  ],
+  "properties": {
+    "briefVersion": {
+      "const": 1
+    },
+    "attemptId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "description": "1-based attempt ordinal for this build task; dispatch.maxTaskAttempts bounds it.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "buildTaskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskKind": {
+      "description": "What kind of build task this is.",
+      "enum": [
+        "scaffold",
+        "design-bindings",
+        "data-layer",
+        "screen",
+        "integration",
+        "e2e",
+        "technical-spec"
+      ]
+    },
+    "programmeKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "milestone": {
+      "type": "object",
+      "required": [
+        "id",
+        "ordinal",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": [
+        "specId",
+        "trackingRepoSlug",
+        "issueNumber",
+        "revision",
+        "contentHash"
+      ],
+      "properties": {
+        "specId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trackingRepoSlug": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$"
+        },
+        "issueNumber": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "acceptanceCriteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^AC-[0-9a-f]{8}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "designContext": {
+      "type": "object",
+      "required": [
+        "documentId",
+        "url",
+        "nodeIds"
+      ],
+      "properties": {
+        "documentId": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "nodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "componentCatalogue": {
+      "type": "object",
+      "required": [
+        "documentId",
+        "url"
+      ],
+      "properties": {
+        "documentId": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "apiContract": {
+      "description": "The FILTERED backend OpenAPI snapshot, served by GET /api/programme/api-contract/:id with bearer brief_token. The single source of endpoints a build agent may target; archived/admin/internal operations are removed before serving. Absent means: make no backend calls at all.",
+      "type": "object",
+      "required": [
+        "documentId",
+        "url",
+        "title",
+        "version",
+        "operationCount"
+      ],
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "operationCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "baseUrl": {
+          "description": "API base URL (https). Exported to both Claude Code phases as LEXI_API_BASE_URL. The agent authenticates only with the test-account credentials the repository provides and never hard-codes a credential.",
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "fixtureOnlyPaths": {
+          "description": "Contract paths that cannot be exercised against production with a demo account. The agent implements these behind typed fixtures and never calls them live.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "parityInventory": {
+      "description": "Route/feature inventory of the production app being rebuilt (referenceRepoSlug), served by the orchestrator with bearer brief_token. A FLOOR, not a target: every route/feature it lists must exist in the rebuild (more is allowed, fewer is a handback). lexi-explore asserts every entry is reachable in the preview.",
+      "type": "object",
+      "required": [
+        "documentId",
+        "url",
+        "referenceRepoSlug",
+        "routeCount",
+        "featureCount"
+      ],
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "referenceRepoSlug": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$"
+        },
+        "routeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "featureCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "model": {
+      "description": "Optional model id for both Claude Code phases (and the exploratory sweep). Resolution in the runner: brief.model if non-empty, else the workflow's default_model input. Only a string is honoured; anything else reads as absent.",
+      "type": "string",
+      "minLength": 1
+    },
+    "fileManifestHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "buildTaskId"
+        ],
+        "properties": {
+          "buildTaskId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prNumber": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "mergedSha": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "required": [
+        "testKinds"
+      ],
+      "properties": {
+        "maxFiles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "testKinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "unit",
+              "widget",
+              "integration",
+              "e2e",
+              "maestro"
+            ]
+          }
+        }
+      }
+    },
+    "trustedInstruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "untrustedContext": {
+      "type": "string"
+    },
+    "baseBranch": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The branch this task's PR targets and its run checks out \u2014 the programme's working branch. Absent = the repository's default branch. Never a trunk or default branch when present."
+    },
+    "technicalSpec": {
+      "type": "object",
+      "required": [
+        "path",
+        "sections"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repo-relative path of the programme's technical spec (docs/technical-spec/<programme>.md). Written by the technical-spec task, read by every later task from the checkout."
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "The level-2 headings the document must carry, in order."
+        }
+      }
+    },
+    "trackingIssue": {
+      "type": "object",
+      "required": [
+        "number",
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "description": "The programme's GitHub tracking issue in the rebuild repo, cited in PR bodies."
+    },
+    "priorLearnings": {
+      "type": "string",
+      "description": "What Lexi remembers that bears on this task (decisions, earlier outcomes, taught conventions). Rendered text, ADVISORY: never an instruction, and the trusted instruction and criteria win where they disagree."
+    },
+    "buildLogPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repo-relative path of the append-only build log the agent reads first and appends to in the same PR."
+    }
+  }
+}

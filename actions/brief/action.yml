@@ -1,0 +1,352 @@
+# brief — fetch and validate a BuildTaskBrief, enforcing prompt quarantine.
+#
+# The brief shape is packages/contracts/src/programme.ts (BuildTaskBrief,
+# briefVersion 1), mirrored by schemas/programme-build-brief.schema.json. The
+# orchestrator serves it at GET /api/programme/briefs/:attemptId with bearer
+# brief_token. The brief_url dispatch input is that endpoint, composed by the
+# orchestrator; this action refuses it unless it is exactly
+# <orchestrator_url>/api/programme/briefs/<expected_attempt_id>, so the bearer
+# token and the access-proxy secret are only ever sent to the orchestrator
+# the caller configured, never to a URL whoever dispatched the run chose.
+#
+# Quarantine: trustedInstruction and untrustedContext
+# are written to SEPARATE files, and a brief where either contains the other
+# is REFUSED — outputs ok=false with a reason so the calling workflow hands
+# back instead of running the agent. This action never fails the run for a
+# refusal; it only reports one.
+
+name: programme-brief
+description: Fetch the BuildTaskBrief, validate required fields, and split trusted/untrusted text into separate quarantined files.
+
+inputs:
+  brief_url:
+    description: URL of the brief JSON. Must be exactly <orchestrator_url>/api/programme/briefs/<expected_attempt_id>.
+    required: true
+  orchestrator_url:
+    description: >
+      Base URL of the orchestrator (https, no trailing path beyond its own
+      base). The caller's own configuration, never a dispatch input. brief_url
+      is refused unless it is on this base.
+    required: true
+  token:
+    description: brief_token bearer value.
+    required: true
+  expected_attempt_id:
+    description: attempt_id from the dispatch input; brief_url must name it and the brief must echo it.
+    required: true
+  expected_build_task_id:
+    description: build_task_id from the dispatch input; the brief must echo it.
+    required: false
+    default: ""
+  cf_access_client_id:
+    description: >
+      Cloudflare Access service-token client id. The orchestrator sits behind
+      Cloudflare Access (Zero Trust), which answers an unauthenticated request
+      with a 302 to a login page rather than a 401 — so without this the brief
+      "fetch" succeeds at the HTTP level and returns HTML. Optional so a
+      deployment without Access still works.
+    required: false
+    default: ""
+  cf_access_client_secret:
+    description: Cloudflare Access service-token client secret.
+    required: false
+    default: ""
+
+outputs:
+  ok:
+    description: "'true' when the brief is valid and quarantine holds; otherwise 'false' with a reason."
+    value: ${{ steps.fetch.outputs.ok }}
+  reason:
+    description: Refusal reason when ok is not 'true'.
+    value: ${{ steps.fetch.outputs.reason }}
+  brief_path:
+    description: Path to the raw brief JSON.
+    value: ${{ steps.fetch.outputs.brief_path }}
+  trusted_path:
+    description: Path to the file holding ONLY trustedInstruction.
+    value: ${{ steps.fetch.outputs.trusted_path }}
+  untrusted_path:
+    description: Path to the file holding ONLY untrustedContext (may be empty).
+    value: ${{ steps.fetch.outputs.untrusted_path }}
+  acceptance_criteria_path:
+    description: Path to a JSON array of {id, text} acceptance criteria.
+    value: ${{ steps.fetch.outputs.acceptance_criteria_path }}
+  attempt_id:
+    description: attemptId parsed from the brief.
+    value: ${{ steps.fetch.outputs.attempt_id }}
+  build_task_id:
+    description: buildTaskId parsed from the brief.
+    value: ${{ steps.fetch.outputs.build_task_id }}
+  milestone_title:
+    description: milestone.title parsed from the brief.
+    value: ${{ steps.fetch.outputs.milestone_title }}
+  model:
+    description: "Optional brief.model (string). Empty when the brief does not name a model; the caller falls back to its default_model input."
+    value: ${{ steps.fetch.outputs.model }}
+  effort:
+    description: "Optional brief.effort — one of low, medium, high, xhigh, max. Empty when absent or not one of those; the agent then runs at the CLI default."
+    value: ${{ steps.fetch.outputs.effort }}
+  parity_inventory_url:
+    description: "Optional brief.parityInventory.url — the feature/route inventory the rebuild must match or exceed. Empty when absent."
+    value: ${{ steps.fetch.outputs.parity_inventory_url }}
+  api_contract_url:
+    description: "Optional brief.apiContract.url — the FILTERED OpenAPI snapshot; the only endpoints the agent may target. Empty when absent."
+    value: ${{ steps.fetch.outputs.api_contract_url }}
+  design_context_url:
+    description: "Optional brief.designContext.url — the Figma prototype snapshot screens are rendered from. Empty when absent."
+    value: ${{ steps.fetch.outputs.design_context_url }}
+  ui_source_repo:
+    description: "Optional brief.uiSource.repoSlug — the EXISTING implementation to port from, as organization/repository. Unlike every other input this is a git repo the runner checks out itself, not a document the orchestrator serves: a React app is thousands of files plus assets and no JSON snapshot carries it faithfully. Empty when the rebuild has nothing to reuse."
+    value: ${{ steps.fetch.outputs.ui_source_repo }}
+  ui_source_ref:
+    description: "Optional brief.uiSource.ref — the branch, tag or sha to check out. Empty when ui_source_repo is empty."
+    value: ${{ steps.fetch.outputs.ui_source_ref }}
+  ui_source_paths:
+    description: "Optional brief.uiSource.paths as a space-separated list — an advisory reading order for a large tree. Empty when absent."
+    value: ${{ steps.fetch.outputs.ui_source_paths }}
+  task_kind:
+    description: "brief.taskKind (scaffold | design-bindings | data-layer | screen | integration | e2e | technical-spec). Drives which phases run: technical-spec drafts one document and posts no evidence."
+    value: ${{ steps.fetch.outputs.task_kind }}
+  technical_spec_path:
+    description: "Optional brief.technicalSpec.path — repo-relative path of the programme's technical spec. The technical-spec task WRITES it; every later task READS it from the checkout. Empty when the programme has none."
+    value: ${{ steps.fetch.outputs.technical_spec_path }}
+  technical_spec_sections:
+    description: "Optional brief.technicalSpec.sections, ONE PER LINE — the level-2 headings the document must carry. Newline-delimited because a section name may contain a comma. Empty when absent."
+    value: ${{ steps.fetch.outputs.technical_spec_sections }}
+  prior_learnings_path:
+    description: "Path to a file holding brief.priorLearnings — what Lexi remembers about this repo, programme and thread. Empty when the brief carries none. ADVISORY text by contract."
+    value: ${{ steps.fetch.outputs.prior_learnings_path }}
+  reuse_manifest_path:
+    description: "Path to a file naming what this task's merged dependencies already built — brief.dependencies and brief.fileManifestHints rendered together. Empty when the brief carries neither. ADVISORY by contract."
+    value: ${{ steps.fetch.outputs.reuse_manifest_path }}
+  build_log_path:
+    description: "Optional brief.buildLogPath — repo-relative path of the append-only build log the agent reads first and appends to in the same PR. Empty when absent."
+    value: ${{ steps.fetch.outputs.build_log_path }}
+  tracking_issue_url:
+    description: "Optional brief.trackingIssue.url — the programme's GitHub status issue, cited in PR bodies. Empty when absent."
+    value: ${{ steps.fetch.outputs.tracking_issue_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch, validate and quarantine
+      id: fetch
+      shell: bash
+      env:
+        BRIEF_URL: ${{ inputs.brief_url }}
+        ORCH_URL: ${{ inputs.orchestrator_url }}
+        BRIEF_TOKEN: ${{ inputs.token }}
+        EXPECTED_ATTEMPT_ID: ${{ inputs.expected_attempt_id }}
+        EXPECTED_BUILD_TASK_ID: ${{ inputs.expected_build_task_id }}
+        CF_ACCESS_CLIENT_ID: ${{ inputs.cf_access_client_id }}
+        CF_ACCESS_CLIENT_SECRET: ${{ inputs.cf_access_client_secret }}
+      run: |
+        set -uo pipefail
+        BRIEF_DIR="$RUNNER_TEMP/brief"
+        mkdir -p "$BRIEF_DIR"
+        BRIEF_PATH="$BRIEF_DIR/brief.json"
+        TRUSTED_PATH="$BRIEF_DIR/trusted_instruction.txt"
+        UNTRUSTED_PATH="$BRIEF_DIR/untrusted_context.txt"
+        AC_PATH="$BRIEF_DIR/acceptance_criteria.json"
+
+        refuse () {
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "reason=$1" >> "$GITHUB_OUTPUT"
+          echo "::warning::brief refused: $1"
+          exit 0
+        }
+
+        if [ -z "$BRIEF_TOKEN" ]; then
+          refuse "brief_token secret is not provisioned"
+        fi
+
+        # Bind brief_url to the orchestrator BEFORE any secret leaves the
+        # runner. brief_url is a dispatch input: anyone who can dispatch the
+        # caller chooses it, and the request below carries the brief bearer
+        # token and the access-proxy secret. orchestrator_url is the caller's
+        # own configuration. The attempt id is restricted to the characters
+        # the orchestrator mints (a UUID) so the URL cannot be bent into
+        # another path, query or host.
+        ORCH="$(printf '%s' "$ORCH_URL" | tr -d '[:space:]')"
+        ORCH="${ORCH%/}"
+        case "$ORCH" in
+          https://?*) ;;
+          *) refuse "orchestrator_url must be an https URL" ;;
+        esac
+        case "$ORCH" in
+          *\?*|*\#*|*@*) refuse "orchestrator_url must be a plain base URL (no query, fragment or credentials)" ;;
+        esac
+        if ! printf '%s' "$EXPECTED_ATTEMPT_ID" | grep -Eq '^[A-Za-z0-9_-]{1,100}$'; then
+          refuse "attempt_id must be 1-100 letters, digits, '-' or '_'"
+        fi
+        if [ "$BRIEF_URL" != "${ORCH}/api/programme/briefs/${EXPECTED_ATTEMPT_ID}" ]; then
+          refuse "brief_url is not this orchestrator's brief endpoint for this attempt (expected <orchestrator_url>/api/programme/briefs/<attempt_id>); refusing to send credentials to it"
+        fi
+
+        # Cloudflare Access service token, when the orchestrator is behind
+        # Zero Trust. Built as an array so an unset pair adds no headers at
+        # all rather than two empty ones (an empty CF-Access-Client-Id is
+        # treated as a malformed token, not as absent).
+        CF_HEADERS=()
+        if [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+          CF_HEADERS=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
+        fi
+
+        CODE=""
+        for i in 1 2 3; do
+          # --fail-with-body so a 3xx/4xx sets a non-2xx code rather than
+          # writing a login page into $BRIEF_PATH, and no -L: following the
+          # redirect is what turns "denied by Access" into "valid HTML".
+          CODE="$(curl -sS -o "$BRIEF_PATH" -w '%{http_code}' \
+            -H "Authorization: Bearer ${BRIEF_TOKEN}" \
+            "${CF_HEADERS[@]+"${CF_HEADERS[@]}"}" \
+            -H "Accept: application/json" \
+            --max-time 30 \
+            "$BRIEF_URL" || echo "000")"
+          case "$CODE" in
+            2*) break ;;
+            *) echo "brief fetch attempt ${i} returned ${CODE}; retrying..."; sleep $((i * 2)) ;;
+          esac
+        done
+        case "$CODE" in
+          2*) ;;
+          # A 302 to a Cloudflare Access login page is the signature of a
+          # missing or unauthorised service token. Say so, because "brief
+          # fetch failed (302)" sends the reader looking at the orchestrator.
+          30*)
+            if [ ${#CF_HEADERS[@]} -eq 0 ]; then
+              refuse "brief fetch got HTTP ${CODE} (redirect) and no Cloudflare Access service token was provided — set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET"
+            fi
+            refuse "brief fetch got HTTP ${CODE} (redirect) despite a Cloudflare Access service token — the token is probably not admitted by the Access policy for this hostname"
+            ;;
+          *) refuse "brief fetch failed (last HTTP ${CODE})" ;;
+        esac
+
+        jq -e 'type == "object"' "$BRIEF_PATH" > /dev/null 2>&1 || refuse "brief is not a JSON object (Cloudflare Access returns an HTML login page; check the service token)"
+
+        # Required fields, per schemas/programme-build-brief.schema.json.
+        jq -e '.briefVersion == 1' "$BRIEF_PATH" > /dev/null || refuse "briefVersion is not 1"
+        jq -e '.attemptId | type == "string" and length > 0' "$BRIEF_PATH" > /dev/null || refuse "attemptId missing or empty"
+        jq -e '.buildTaskId | type == "string" and length > 0' "$BRIEF_PATH" > /dev/null || refuse "buildTaskId missing or empty"
+        jq -e '.acceptanceCriteria | type == "array" and length > 0' "$BRIEF_PATH" > /dev/null || refuse "acceptanceCriteria missing or empty"
+        jq -e '[.acceptanceCriteria[] | select((.id | type != "string") or (.text | type != "string"))] | length == 0' "$BRIEF_PATH" > /dev/null || refuse "acceptanceCriteria entries must be {id, text} strings"
+        jq -e '.trustedInstruction | type == "string" and length > 0' "$BRIEF_PATH" > /dev/null || refuse "trustedInstruction missing or empty"
+
+        BRIEF_ATTEMPT="$(jq -r '.attemptId' "$BRIEF_PATH")"
+        BRIEF_TASK="$(jq -r '.buildTaskId' "$BRIEF_PATH")"
+        if [ -n "$EXPECTED_ATTEMPT_ID" ] && [ "$BRIEF_ATTEMPT" != "$EXPECTED_ATTEMPT_ID" ]; then
+          refuse "brief attemptId (${BRIEF_ATTEMPT}) does not match the dispatch input"
+        fi
+        if [ -n "$EXPECTED_BUILD_TASK_ID" ] && [ "$BRIEF_TASK" != "$EXPECTED_BUILD_TASK_ID" ]; then
+          refuse "brief buildTaskId (${BRIEF_TASK}) does not match the dispatch input"
+        fi
+
+        # Write trusted and untrusted text as SEPARATE files, never concatenated.
+        jq -r '.trustedInstruction' "$BRIEF_PATH" > "$TRUSTED_PATH"
+        jq -r '.untrustedContext // ""' "$BRIEF_PATH" > "$UNTRUSTED_PATH"
+        jq -c '[.acceptanceCriteria[] | {id, text}]' "$BRIEF_PATH" > "$AC_PATH"
+
+        # Quarantine: refuse a brief where either text contains the other.
+        TRUSTED="$(cat "$TRUSTED_PATH")"
+        UNTRUSTED="$(cat "$UNTRUSTED_PATH")"
+        if [ -n "$UNTRUSTED" ]; then
+          case "$TRUSTED" in
+            *"$UNTRUSTED"*) refuse "quarantine violated: trustedInstruction contains untrustedContext" ;;
+          esac
+          case "$UNTRUSTED" in
+            *"$TRUSTED"*) refuse "quarantine violated: untrustedContext contains trustedInstruction" ;;
+          esac
+        fi
+
+        {
+          echo "ok=true"
+          echo "reason="
+          echo "brief_path=$BRIEF_PATH"
+          echo "trusted_path=$TRUSTED_PATH"
+          echo "untrusted_path=$UNTRUSTED_PATH"
+          echo "acceptance_criteria_path=$AC_PATH"
+          echo "attempt_id=$BRIEF_ATTEMPT"
+          echo "build_task_id=$BRIEF_TASK"
+          echo "milestone_title=$(jq -r '.milestone.title // ""' "$BRIEF_PATH")"
+          # Optional fields. Only string values are honoured (a non-string
+          # collapses to "" rather than leaking a JSON fragment into the
+          # caller's env) and CR/LF are stripped so a value can never smuggle
+          # a second key=value line into GITHUB_OUTPUT.
+          echo "model=$(jq -r 'if (.model | type) == "string" then .model else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          # A closed set, not a free string: the value becomes a CLI flag.
+          echo "effort=$(jq -r 'if (.effort | type) == "string" and (.effort | test("^(low|medium|high|xhigh|max)$")) then .effort else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "parity_inventory_url=$(jq -r 'if (.parityInventory.url? | type) == "string" then .parityInventory.url else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "api_contract_url=$(jq -r 'if (.apiContract.url? | type) == "string" then .apiContract.url else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "design_context_url=$(jq -r 'if (.designContext.url? | type) == "string" then .designContext.url else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          # uiSource is a repo, not a URL: emitted as three scalars the caller
+          # feeds straight to a checkout. `tr -d` on each because a stray
+          # newline in a ref would break the clone with a confusing message.
+          echo "ui_source_repo=$(jq -r 'if (.uiSource.repoSlug? | type) == "string" then .uiSource.repoSlug else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "ui_source_ref=$(jq -r 'if (.uiSource.ref? | type) == "string" then .uiSource.ref else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "ui_source_paths=$(jq -r 'if (.uiSource.paths? | type) == "array" then ([.uiSource.paths[] | select(type == "string" and length > 0)] | join(" ")) else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          # Working-branch programmes (optional briefVersion 1 fields). Same
+          # discipline: strings only, CR/LF stripped.
+          echo "task_kind=$(jq -r 'if (.taskKind | type) == "string" then .taskKind else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "technical_spec_path=$(jq -r 'if (.technicalSpec.path? | type) == "string" then .technicalSpec.path else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "build_log_path=$(jq -r 'if (.buildLogPath | type) == "string" then .buildLogPath else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          echo "tracking_issue_url=$(jq -r 'if (.trackingIssue.url? | type) == "string" then .trackingIssue.url else "" end' "$BRIEF_PATH" | tr -d '\r\n')"
+          # priorLearnings is multi-line prose: written to its own file, never
+          # to GITHUB_OUTPUT, and never concatenated with the trusted text.
+          # dependencies + fileManifestHints, rendered together as one file.
+          # Both have been in the brief contract since it was written and
+          # neither was ever read here, so a task was told nothing about what
+          # its dependencies had already built, and parallel screens each
+          # wrote their own copy of the same shared module.
+          #
+          # A file, not a GITHUB_OUTPUT scalar: a manifest runs to dozens of
+          # lines, and the 128KB single-variable cap is exactly what killed a
+          # finished RED phase once already.
+          REUSE_PATH="$BRIEF_DIR/reuse_manifest.md"
+          REUSE_OUT=""
+          if jq -e '((.dependencies? | length) > 0) or ((.fileManifestHints? | length) > 0)' "$BRIEF_PATH" > /dev/null 2>&1; then
+            jq -r '
+              ["# Already built by the tasks you depend on",
+               "",
+               "Their pull requests are merged, so this code is in the branch you have",
+               "checked out. Import it. Do not re-derive it.",
+               ""]
+              + (if ((.dependencies? | length) > 0) then
+                   ["## Merged dependencies", ""]
+                   + [ .dependencies[]
+                       | select((.mergedSha? | type) == "string")
+                       | "- " + .buildTaskId
+                         + (if (.prNumber? | type) == "number" then " (PR #" + (.prNumber | tostring) + ")" else "" end)
+                         + (if (.mergedSha? | type) == "string" then " at " + (.mergedSha[0:12]) else "" end) ]
+                   + [""]
+                 else [] end)
+              + (if ((.fileManifestHints? | length) > 0) then
+                   ["## Files they wrote", "",
+                    "Read one before writing anything with the same responsibility.", ""]
+                   + [ .fileManifestHints[] | select(type == "string") | "- " + . ]
+                   + [""]
+                 else [] end)
+              | .[]
+            ' "$BRIEF_PATH" > "$REUSE_PATH"
+            if [ -s "$REUSE_PATH" ]; then REUSE_OUT="$REUSE_PATH"; fi
+          fi
+          echo "reuse_manifest_path=$REUSE_OUT"
+          LEARNINGS_PATH="$BRIEF_DIR/prior_learnings.md"
+          if jq -e '(.priorLearnings | type) == "string" and (.priorLearnings | length) > 0' "$BRIEF_PATH" > /dev/null 2>&1; then
+            jq -r '.priorLearnings' "$BRIEF_PATH" > "$LEARNINGS_PATH"
+            echo "prior_learnings_path=$LEARNINGS_PATH"
+          else
+            echo "prior_learnings_path="
+          fi
+        } >> "$GITHUB_OUTPUT"
+
+        # One heading per line, NOT comma-joined: a required section name may
+        # itself contain a comma ("State, data and error handling"), and a
+        # comma-split consumer then looks for two headings that do not exist
+        # and reports them joined by ", " — which reads exactly like the one
+        # real name, and a correct technical spec is rejected for it.
+        {
+          echo "technical_spec_sections<<LEXI_SECTIONS_EOF"
+          jq -r 'if (.technicalSpec.sections? | type) == "array" then (.technicalSpec.sections[] | select(type == "string" and length > 0)) else empty end' "$BRIEF_PATH" | tr -d '\r'
+          echo "LEXI_SECTIONS_EOF"
+        } >> "$GITHUB_OUTPUT"
+        echo "Brief validated for attempt ${BRIEF_ATTEMPT}, task ${BRIEF_TASK}."

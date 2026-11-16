@@ -1,0 +1,22 @@
+{
+  "name": "@lexi/ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Decision engine for bug triage: structured LLM reasoning over evidence. It never writes to GitHub, Slack or the database.",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/logger": "*",
+    "@lexi/privacy": "*",
+    "@nestjs/common": "^11.1.28",
+    "openai": "^4.55.4",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@lexi/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cross-package TypeScript contracts (types only)",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

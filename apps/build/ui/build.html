@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lexi Build — The Table</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="index.html">Lexi<em>·</em>Build</a>
+  <span class="crumb">The Table</span>
+  <div class="top-right">
+    <span class="runs-local"><i></i>Agents run on this Mac</span>
+    <select class="runner-select" id="runner-select" title="Choose which agent runtime works this table">
+      <option value="kiro">Kiro CLI</option>
+      <option value="claude">Claude Code</option>
+      <option value="cursor">Cursor Agent</option>
+      <option value="codex">Codex</option>
+    </select>
+    <span class="bridge-status" id="bridge-status" title="Lexi Bridge on localhost:7341">bridge · offline</span>
+    <div class="device-toggle" role="tablist">
+      <button class="dt on" data-device="web" type="button">Web app</button>
+      <button class="dt" data-device="mobile" type="button">Mobile app</button>
+    </div>
+    <button class="button" id="btn-replay" type="button">↺ Replay</button>
+    <button class="button button-red" id="btn-start" type="button">Start: build the sample app →</button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- THE TABLE -->
+  <section class="stage-wrap">
+    <div class="stage-head">
+      <div>
+        <h1 id="project-name">Untitled product</h1>
+        <p id="project-sub">Give Lexi an intent. She plans against the Business Spec, builds on this screen, and ships nothing without your approval.</p>
+      </div>
+      <div class="phase-line" id="phase-line"></div>
+    </div>
+
+    <!-- PLANNING ARTIFACTS: pinned above the table as Lexi creates them -->
+    <section class="artifacts" id="artifacts" aria-label="Planning artifacts">
+      <article class="artifact" id="card-spec">
+        <header><span>Business Spec</span><small>source of truth</small></header>
+        <div class="artifact-body" id="spec-body"></div>
+      </article>
+      <article class="artifact" id="card-research">
+        <header><span>Competitor research</span><small>patterns, not pixels</small></header>
+        <div class="artifact-body" id="research-body"></div>
+      </article>
+      <article class="artifact" id="card-positioning">
+        <header><span>Positioning</span><small>match · beat · ignore</small></header>
+        <div class="artifact-body" id="positioning-body"></div>
+      </article>
+      <article class="artifact" id="card-decisions">
+        <header><span>Decision log</span><small>yours + assumed</small></header>
+        <div class="artifact-body" id="decisions-body"></div>
+      </article>
+    </section>
+
+    <div class="table" id="table">
+      <div class="device" id="device">
+        <div class="device-bar"><span></span><span></span><span></span><em id="device-url">preview.localhost</em></div>
+        <div class="screen" id="screen">
+          <div class="blank" id="blank">
+            <p class="blank-title">Nothing here yet.</p>
+            <p class="blank-sub">First a wireframe, then the real product —<br>drawn on this screen, live.</p>
+          </div>
+          <!-- built elements land here -->
+          <header class="el el-nav" data-el="nav"></header>
+          <section class="el el-hero" data-el="hero"></section>
+          <section class="el el-features" data-el="features"></section>
+          <section class="el el-pricing" data-el="pricing"></section>
+          <footer class="el el-footer" data-el="footer"></footer>
+          <div class="pins" id="pins"></div>
+          <div class="ship-badge hidden" id="ship-badge">✓ Shipped · preview live</div>
+        </div>
+      </div>
+      <div class="agents-layer" id="agents-layer"></div>
+    </div>
+
+    <!-- HUMAN APPROVAL GATE -->
+    <div class="approval hidden" id="approval">
+      <div class="approval-text">
+        <strong id="approval-title">Your approval needed — Ship is locked.</strong>
+        <span id="approval-sub">Review the built UI on the screen, then decide.</span>
+      </div>
+      <div class="approval-actions">
+        <button class="button" id="btn-changes" type="button">Request changes</button>
+        <button class="button button-red" id="btn-approve" type="button">Approve &amp; ship →</button>
+      </div>
+    </div>
+
+    <form class="ask" id="ask-form">
+      <span class="ask-avatar">You</span>
+      <input id="ask-input" autocomplete="off" placeholder="State an intent… or mid-build ask “status” / steer: “make the hero calmer”">
+      <button class="button button-red" type="submit">Ask Lexi</button>
+    </form>
+  </section>
+
+  <!-- SIDE: CREW + CHAT -->
+  <aside class="side">
+    <section class="crew" id="crew-section">
+      <button class="side-head crew-toggle" id="crew-toggle" type="button" aria-expanded="true">
+        <span>Crew — assembled per job</span>
+        <span class="crew-head-right"><small id="crew-count"></small><span class="chevron" aria-hidden="true">▾</span></span>
+      </button>
+      <div id="crew"></div>
+    </section>
+    <section class="chatbox">
+      <header class="side-head"><span>Table chat</span><small>decisions happen here</small></header>
+      <div class="chat-log" id="chat-log"></div>
+      <div class="typing hidden" id="typing"><span class="t-avatar" id="typing-avatar"></span><span class="dots"><i></i><i></i><i></i></span><span id="typing-name">Lexi is typing</span></div>
+    </section>
+  </aside>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

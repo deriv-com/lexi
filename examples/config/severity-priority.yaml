@@ -1,0 +1,51 @@
+# Severity and priority rules for the fictional "Acme" organisation.
+#
+# The model extracts facts from a report (does it move money, block login, have
+# a workaround); these rules turn the facts into a severity and a priority. The
+# first rule whose every `when` condition matches wins, so order the most severe
+# rules first. A report no rule matches is S4 / P4.
+
+version: "1.0.0"
+
+# Never lower a priority a person set by hand.
+humanPriorityProtection: true
+
+priorityOrder: [P0, P1, P2, P3, P4]
+severityOrder: [S1, S2, S3, S4]
+
+rules:
+  - id: money_movement_blocked
+    when: { moneyMovement: true, workaroundAvailable: false }
+    severity: S1
+    priority: P0
+    explanation: Customers cannot move money and have no workaround.
+
+  - id: data_integrity
+    when: { dataIntegrity: true }
+    severity: S1
+    priority: P0
+    explanation: Stored data may be wrong or lost.
+
+  - id: login_blocked
+    when: { authentication: true, workaroundAvailable: false }
+    severity: S1
+    priority: P1
+    explanation: Customers cannot sign in and have no workaround.
+
+  - id: frequent_regression
+    when: { regression: true, frequency: frequent }
+    severity: S2
+    priority: P1
+    explanation: Something that used to work now fails for many customers.
+
+  - id: customer_facing_no_workaround
+    when: { customerFacing: true, workaroundAvailable: false }
+    severity: S2
+    priority: P2
+    explanation: Customer-facing failure with no workaround.
+
+  - id: customer_facing_with_workaround
+    when: { customerFacing: true, workaroundAvailable: true }
+    severity: S3
+    priority: P3
+    explanation: Customer-facing failure that customers can work around.

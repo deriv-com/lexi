@@ -1,0 +1,37 @@
+# Memory policy for the fictional "Acme" organisation.
+#
+# Controls what the agent remembers between turns, how much of it is put back
+# into a prompt, and who can see it.
+
+version: "1.0.0"
+enabled: true
+
+budgets:
+  maxMemoryTokens: 4000
+  maxThreadStateTokens: 800
+  maxDigestsBeforeCompaction: 20
+  maxEpisodesPerRecall: 10
+
+retention:
+  episodeDays: 90
+  supersededDigestDays: 365
+  minImportanceToRetain: 0.3
+
+extraction:
+  # Deterministic extraction only: no model call decides what is remembered.
+  deterministic: true
+  llmFreeText: false
+  skipOnFastPath: true
+
+visibility:
+  # Kinds every member of the organisation may recall.
+  orgKinds: [decision, assignment, escalation, fact, outcome]
+  # Kinds only the person they are about may recall.
+  userKinds: [preference]
+  # Anything learned in a direct message stays with that user.
+  dmDerivedIsUserScoped: true
+
+semantic:
+  sources: []
+  dedupeByContentHash: true
+  embeddingBatchSize: 50

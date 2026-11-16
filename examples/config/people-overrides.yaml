@@ -1,0 +1,42 @@
+# People directory overrides for the fictional "Acme" organisation.
+#
+# GitHub logins and Slack IDs share no field, so the agent links them only
+# through an explicit entry here (or a Slack profile that already carries a
+# GitHub login). It never guesses. `managerGithub` drives the MANAGER rung of
+# the escalation ladder.
+
+people:
+  - githubLogin: alice
+    slackId: U0TEST01
+    displayName: Alice
+    managerGithub: grace
+    teams: [web]
+  - githubLogin: bob
+    slackId: U0TEST02
+    displayName: Bob
+    managerGithub: grace
+    teams: [mobile]
+  - githubLogin: carol
+    slackId: U0TEST03
+    displayName: Carol
+    managerGithub: alice
+    teams: [web]
+  - githubLogin: dave
+    slackId: U0TEST04
+    displayName: Dave
+    managerGithub: bob
+    teams: [mobile]
+  - githubLogin: erin
+    slackId: U0TEST05
+    displayName: Erin
+    managerGithub: alice
+    teams: [web]
+  - githubLogin: frank
+    slackId: U0TEST06
+    displayName: Frank
+    managerGithub: bob
+    teams: [mobile]
+  - githubLogin: grace
+    slackId: U0TEST07
+    displayName: Grace
+    teams: [web, mobile]

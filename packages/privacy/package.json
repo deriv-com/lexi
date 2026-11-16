@@ -1,0 +1,15 @@
+{
+  "name": "@lexi/privacy",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Masks personal data (emails, phone numbers, card numbers, IBANs, IP addresses) out of text before it is sent to a model",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

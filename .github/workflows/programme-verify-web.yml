@@ -1,0 +1,212 @@
+# programme-verify-web — reusable post-merge verification against a preview deploy.
+#
+# Skeleton. Runs the repo's Playwright e2e suite against a preview
+# URL plus an axe accessibility scan, and POSTs the results to the
+# orchestrator as a `checks` RunEvidenceBundle. Acceptance evidence for web
+# programmes is the repository's own e2e suite, and this workflow is its
+# channel.
+#
+# Two jobs. `verify` runs the repository's own code (npm ci, its install
+# scripts and its e2e suite), so it holds no credential: the evidence token
+# and the access-proxy secret exist only in `report`, a fresh runner that
+# never runs that code and checks out the Lexi actions itself. The checks
+# reach `report` as a job output.
+
+name: programme-verify-web
+
+on:
+  workflow_call:
+    inputs:
+      attempt_id:
+        description: QuickFixAttempt id echoed on the evidence bundle.
+        required: true
+        type: string
+      preview_url:
+        description: Fully-qualified preview deployment URL to verify.
+        required: true
+        type: string
+      enabled:
+        description: >-
+          Kill switch. The caller normally passes its repository variable,
+          vars.PROGRAMME_BUILD_ENABLED == 'true'. False skips every job cleanly.
+        required: false
+        type: boolean
+        default: false
+      orchestrator_url:
+        description: Base URL of the orchestrator. Evidence is POSTed to <orchestrator_url>/api/evidence.
+        required: true
+        type: string
+      runner:
+        description: Runner for the verification job. Its egress must reach the preview and the orchestrator.
+        required: false
+        type: string
+        default: ubuntu-latest
+      node_version:
+        description: Node.js version for the e2e suite.
+        required: false
+        type: string
+        default: "22"
+      lexi_repository:
+        description: Repository holding the composite actions and scripts this workflow uses.
+        required: false
+        type: string
+        default: deriv-com/lexi
+      lexi_ref:
+        description: Ref of lexi_repository. Pin it to the same ref as this workflow.
+        required: false
+        type: string
+        default: main
+      axe_core_version:
+        description: Exact @axe-core/cli version the accessibility scan runs.
+        required: false
+        type: string
+        default: "4.14.0"
+    secrets:
+      evidence_token:
+        required: false
+      access_client_id:
+        description: Access service-token client id, when the orchestrator sits behind an identity-aware proxy.
+        required: false
+      access_client_secret:
+        description: Access service-token client secret.
+        required: false
+
+jobs:
+  verify:
+    if: ${{ inputs.enabled }}
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    outputs:
+      checks: ${{ steps.compose.outputs.checks }}
+    steps:
+      - name: Check out without leaving a credential behind
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Run Playwright e2e against the preview
+        id: e2e
+        env:
+          PREVIEW_URL: ${{ inputs.preview_url }}
+        run: |
+          set -uo pipefail
+          STATUS=skipped
+          DETAIL="no package.json / e2e suite yet — skeleton repo"
+          if [ -f package.json ] && jq -e '.scripts["test:e2e"]' package.json > /dev/null 2>&1; then
+            npm ci
+            # The repository's own Playwright, at the version its lockfile pins.
+            npx --no-install playwright install --with-deps chromium
+            if BASE_URL="$PREVIEW_URL" npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e.log"; then
+              STATUS=passed; DETAIL=""
+            else
+              STATUS=failed; DETAIL="$(tail -c 2000 "$RUNNER_TEMP/e2e.log")"
+            fi
+          fi
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          {
+            echo "detail<<LEXI_EOF_E2E"
+            echo "$DETAIL"
+            echo "LEXI_EOF_E2E"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run axe accessibility scan against the preview
+        id: a11y
+        env:
+          PREVIEW_URL: ${{ inputs.preview_url }}
+          AXE_CORE_VERSION: ${{ inputs.axe_core_version }}
+        run: |
+          set -uo pipefail
+          STATUS=failed
+          DETAIL=""
+          if ! printf '%s' "$AXE_CORE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            DETAIL="axe_core_version must be an exact version (got '${AXE_CORE_VERSION}')"
+          # An exact version, so a new release cannot change the verdict.
+          elif OUT="$(npx --yes "@axe-core/cli@${AXE_CORE_VERSION}" "$PREVIEW_URL" 2>&1)"; then
+            STATUS=passed
+          else
+            DETAIL="${OUT: -2000}"
+          fi
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          {
+            echo "detail<<LEXI_EOF_A11Y"
+            echo "$DETAIL"
+            echo "LEXI_EOF_A11Y"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compose checks JSON
+        id: compose
+        env:
+          E2E_STATUS: ${{ steps.e2e.outputs.status }}
+          E2E_DETAIL: ${{ steps.e2e.outputs.detail }}
+          A11Y_STATUS: ${{ steps.a11y.outputs.status }}
+          A11Y_DETAIL: ${{ steps.a11y.outputs.detail }}
+        run: |
+          set -euo pipefail
+          # One line (jq -c), so it travels as a plain job output.
+          CHECKS="$(jq -nc \
+            --arg e2eStatus "$E2E_STATUS" --arg e2eDetail "$E2E_DETAIL" \
+            --arg a11yStatus "$A11Y_STATUS" --arg a11yDetail "$A11Y_DETAIL" \
+            '[{name: "e2e", status: $e2eStatus} + (if $e2eDetail != "" then {detail: $e2eDetail} else {} end),
+              {name: "a11y", status: $a11yStatus} + (if $a11yDetail != "" then {detail: $a11yDetail} else {} end)]')"
+          echo "checks=${CHECKS}" >> "$GITHUB_OUTPUT"
+
+  # Posts the evidence. A fresh runner that never runs the repository's code.
+  report:
+    needs: verify
+    if: ${{ always() && inputs.enabled }}
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the Lexi actions
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.lexi_repository }}
+          ref: ${{ inputs.lexi_ref }}
+          path: .lexi-agent
+          persist-credentials: false
+
+      # The checks came from the job that ran the repository's code: data,
+      # re-validated here. A verify job that did not finish reports both
+      # checks as errored rather than posting nothing.
+      - name: Read the checks
+        id: checks
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          CHECKS_JSON: ${{ needs.verify.outputs.checks }}
+        run: |
+          set -uo pipefail
+          if [ "$VERIFY_RESULT" = "success" ] && printf '%s' "$CHECKS_JSON" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+            CHECKS="$(printf '%s' "$CHECKS_JSON" | jq -c '[.[] | objects | {name: (.name | tostring | .[0:100]), status: (.status | tostring)} + (if (.detail | type) == "string" then {detail: (.detail | .[0:2000])} else {} end)]')"
+          else
+            CHECKS="$(jq -nc --arg r "the verify job did not finish (${VERIFY_RESULT})" \
+              '[{name: "e2e", status: "errored", detail: $r}, {name: "a11y", status: "errored", detail: $r}]')"
+          fi
+          echo "checks=${CHECKS}" >> "$GITHUB_OUTPUT"
+
+      - name: POST checks evidence
+        uses: ./.lexi-agent/actions/evidence
+        with:
+          phase: checks
+          attempt_id: ${{ inputs.attempt_id }}
+          orchestrator_url: ${{ inputs.orchestrator_url }}
+          token: ${{ secrets.evidence_token }}
+          cf_access_client_id: ${{ secrets.access_client_id }}
+          cf_access_client_secret: ${{ secrets.access_client_secret }}
+          checks_json: ${{ steps.checks.outputs.checks }}
+          commit_sha: ${{ github.sha }}
+
+      - name: Upload programme-evidence artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: programme-evidence
+          path: ${{ runner.temp }}/evidence/*.json
+          overwrite: true
+          if-no-files-found: warn

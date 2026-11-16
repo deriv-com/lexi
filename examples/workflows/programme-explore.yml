@@ -1,0 +1,71 @@
+# Copy into your rebuild repository as .github/workflows/programme-explore.yml.
+#
+# A thin caller for the exploratory sweep of a preview deployment. The
+# orchestrator dispatches it during the hardening phase; the sweep files what
+# it finds as issues in this repository, labelled with `findings_label`.
+#
+# Pin `uses:` to a release tag or commit SHA rather than @main once one exists,
+# and set `lexi_ref` to the same ref so the composite actions match the workflow.
+
+name: programme-explore
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempt_id:
+        description: Attempt id, echoed on the evidence bundle.
+        required: true
+        type: string
+      preview_url:
+        description: Fully-qualified preview deployment URL to sweep.
+        required: true
+        type: string
+      commit_sha:
+        description: Commit the preview was built from.
+        required: true
+        type: string
+      brief_url:
+        description: Optional brief carrying the routes and acceptance criteria to cover. When set, must be <LEXI_ORCHESTRATOR_URL>/api/programme/briefs/<attempt_id>.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  explore:
+    uses: deriv-com/lexi/.github/workflows/programme-explore.yml@main
+    with:
+      attempt_id: ${{ inputs.attempt_id }}
+      preview_url: ${{ inputs.preview_url }}
+      commit_sha: ${{ inputs.commit_sha }}
+      brief_url: ${{ inputs.brief_url }}
+      enabled: ${{ vars.PROGRAMME_BUILD_ENABLED == 'true' }}
+      orchestrator_url: ${{ vars.LEXI_ORCHESTRATOR_URL }}
+      model_base_url: ${{ vars.LEXI_MODEL_BASE_URL }}
+      # Hosts the bot-check bypass may be sent to, e.g. "*.preview.example.com".
+      # Empty: the bypass secret is never used.
+      preview_allowed_hosts: ${{ vars.PROGRAMME_PREVIEW_HOSTS }}
+      # Everything below is optional. Uncomment what your repository needs.
+      # runner: ubuntu-latest
+      # default_model: claude-sonnet-5-5
+      # findings_label: lexi-findings
+      # sweep_timeout_minutes: 75
+      # Exact versions the sweep installs (pinned by default).
+      # claude_code_version: "2.1.319"
+      # playwright_version: "1.65.0"
+      # axe_core_version: "4.14.0"
+      lexi_ref: main
+    secrets:
+      model_api_key: ${{ secrets.LEXI_MODEL_API_KEY }}
+      brief_token: ${{ secrets.LEXI_BRIEF_TOKEN }}
+      evidence_token: ${{ secrets.LEXI_EVIDENCE_TOKEN }}
+      # Only when the preview sits behind a bot challenge that honours a bypass user agent.
+      # It is sent only to hosts in preview_allowed_hosts, and the sweep agent can
+      # read it: use a low-value, non-production, rotatable value.
+      # turnstile_bypass_user_agent: ${{ secrets.TURNSTILE_BYPASS_USER_AGENT }}
+      # Only when the orchestrator sits behind an identity-aware proxy.
+      # access_client_id: ${{ secrets.LEXI_ACCESS_CLIENT_ID }}
+      # access_client_secret: ${{ secrets.LEXI_ACCESS_CLIENT_SECRET }}

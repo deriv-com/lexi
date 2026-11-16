@@ -1,0 +1,86 @@
+# Spec engine policy for the fictional "Acme" organisation.
+#
+# The spec engine interviews a requester in Slack until every mandatory coverage
+# dimension is answered, drafts a spec issue, and routes it for human approval.
+# Copy this file into your own GOVERNANCE_CONFIG_DIR and adjust it.
+
+version: "1.0.0"
+enabled: true
+
+writes:
+  # Both default to false in the loader; turn them on once a `specs` repo is registered.
+  githubIssuesEnabled: true
+  approvalEnabled: true
+
+coverage:
+  mandatoryDimensions:
+    - problem
+    - users
+    - scope
+    - non_goals
+    - acceptance_criteria
+    - platforms
+    - dependencies
+    - risks
+    - rollout
+    - journey_states
+    - api_contract
+  deferrableDimensions:
+    - performance_plan
+  maxQuestionTurns: 5
+
+questioning:
+  minQuestionsPerTurn: 2
+  maxQuestionsPerTurn: 4
+  offerDefaultForEveryQuestion: true
+  neverReaskCoveredDimensions: true
+  mineBeforeAsking: true
+
+output:
+  requiredRepoRole: specs
+  titlePrefix: "[Spec]"
+  labels:
+    type: "type:spec"
+    draft: "spec:draft"
+    approved: "spec:approved"
+  boardColumn: "Spec review"
+  announceInGovernanceChannel: true
+
+approval:
+  riskTiers: [low, medium, high, critical]
+  # A spec nothing classified is treated as high risk, never low.
+  defaultRiskTier: high
+  twoPersonRule:
+    enabled: false
+    minRiskTier: medium
+
+# Keyword rules that set a spec's risk tier. A raise always beats a lower, so a
+# spec that touches money cannot be self-approved by calling itself a copy change.
+riskClassifier:
+  enabled: true
+  rules:
+    - id: money_movement
+      direction: raise
+      tier: critical
+      anyKeywords: [payment, deposit, withdraw, payout, transfer funds, wallet, billing, refund, chargeback, pricing]
+    - id: auth_or_kyc_surface
+      direction: raise
+      tier: high
+      anyKeywords: [authentication, login, sign-in, sign in, signup, sign up, password, mfa, 2fa, otp, kyc, identity verification, permission]
+    - id: data_migration
+      direction: raise
+      tier: high
+      anyKeywords: [data migration, backfill, schema change, schema migration, drop column, reindex]
+    - id: new_external_dependency
+      direction: raise
+      tier: medium
+      dimensions: [dependencies]
+      anyKeywords: [third-party, third party, new sdk, new library, new service, vendor]
+    - id: broad_platform_reach
+      direction: raise
+      tier: medium
+      minPlatforms: 3
+    - id: copy_only_change
+      direction: lower
+      tier: low
+      anyKeywords: [copy change, reword, typo, wording]

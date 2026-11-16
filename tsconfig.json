@@ -1,0 +1,84 @@
+{
+  "//": "Solution file: `tsc -b` builds every package listed in references. vitest.config.ts is type-checked here too.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler"
+  },
+  "include": [
+    "vitest.config.ts"
+  ],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/privacy"
+    },
+    {
+      "path": "./packages/logger"
+    },
+    {
+      "path": "./packages/metrics"
+    },
+    {
+      "path": "./packages/config"
+    },
+    {
+      "path": "./packages/database"
+    },
+    {
+      "path": "./packages/ai"
+    },
+    {
+      "path": "./packages/github"
+    },
+    {
+      "path": "./packages/slack"
+    },
+    {
+      "path": "./packages/notifications"
+    },
+    {
+      "path": "./packages/ownership"
+    },
+    {
+      "path": "./packages/specs"
+    },
+    {
+      "path": "./packages/workitems"
+    },
+    {
+      "path": "./packages/memory"
+    },
+    {
+      "path": "./packages/governance"
+    },
+    {
+      "path": "./packages/workflows"
+    },
+    {
+      "path": "./packages/programme"
+    },
+    {
+      "path": "./packages/figma"
+    },
+    {
+      "path": "./packages/app-build"
+    },
+    {
+      "path": "./packages/agent"
+    },
+    {
+      "path": "./packages/agent-tools"
+    },
+    {
+      "path": "./apps/server"
+    }
+  ]
+}

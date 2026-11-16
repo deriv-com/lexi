@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../agent" },
+    { "path": "../contracts" },
+    { "path": "../github" },
+    { "path": "../governance" },
+    { "path": "../memory" },
+    { "path": "../slack" },
+    { "path": "../specs" },
+    { "path": "../workitems" }
+  ],
+  "include": ["src"]
+}

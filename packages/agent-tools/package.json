@@ -1,0 +1,27 @@
+{
+  "name": "@lexi/agent-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tool modules for the agent runtime: GitHub reads and governed writes, Slack, memory, specs, work items and agent-fix dispatch",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/agent": "*",
+    "@lexi/contracts": "*",
+    "@lexi/github": "*",
+    "@lexi/governance": "*",
+    "@lexi/memory": "*",
+    "@lexi/slack": "*",
+    "@lexi/specs": "*",
+    "@lexi/workitems": "*"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.3.2",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,62 @@
+# Copy into your rebuild repository as .github/workflows/programme-feature-intake.yml.
+#
+# A thin caller: takes one feature of the live product and files one
+# implementation issue for it in this repository, with screenshots committed to
+# the `assets_branch` branch so they render in the issue. How the feature is
+# studied is the skill named by `skill` (default `feature-intake`, in skills/).
+#
+# Pin `uses:` to a release tag or commit SHA rather than @main once one exists,
+# and set `lexi_ref` to the same ref so the composite actions match the workflow.
+
+name: programme-feature-intake
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature:
+        description: The feature to take in, in plain words. At most 500 characters.
+        required: true
+        type: string
+      platform:
+        description: '"web" or "mobile".'
+        required: false
+        type: string
+        default: web
+      needs_approval:
+        description: '"true" files the issue as needs-approval instead of ready-for-agent.'
+        required: false
+        type: string
+        default: "false"
+      requested_by:
+        description: Who asked, and where. Shown in the issue footer.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  intake:
+    uses: deriv-com/lexi/.github/workflows/programme-feature-intake.yml@main
+    with:
+      feature: ${{ inputs.feature }}
+      platform: ${{ inputs.platform }}
+      needs_approval: ${{ inputs.needs_approval }}
+      requested_by: ${{ inputs.requested_by }}
+      site_url: https://app.example.com/dashboard
+      enabled: ${{ vars.PROGRAMME_BUILD_ENABLED == 'true' }}
+      model_base_url: ${{ vars.LEXI_MODEL_BASE_URL }}
+      # Everything below is optional. Uncomment what your repository needs.
+      # model: claude-opus-5-5
+      # minutes: "60"
+      # reference_repositories: acme/web-app
+      # assets_branch: lexi/intake-assets
+      lexi_ref: main
+    secrets:
+      app_id: ${{ secrets.LEXI_APP_ID }}
+      app_private_key: ${{ secrets.LEXI_APP_PRIVATE_KEY }}
+      model_api_key: ${{ secrets.LEXI_MODEL_API_KEY }}
+      # A test account on the live product, when the feature sits behind log-in.
+      # test_account_email: ${{ secrets.TEST_ACCOUNT_EMAIL }}
+      # test_account_password: ${{ secrets.TEST_ACCOUNT_PASSWORD }}

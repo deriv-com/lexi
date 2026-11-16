@@ -1,0 +1,30 @@
+# Run budgets for the fictional "Acme" organisation.
+#
+# A budget caps how much one automation run may change. A run that reaches a
+# limit stops, defers the remainder to the next run, and publishes a partial
+# digest. There are deliberately no built-in defaults: a limit missing from this
+# file cannot be resolved, so the subsystem that needs it refuses to run rather
+# than guessing.
+#
+# Every key names its window: PerRun, PerHour, or (batchSize) per command.
+
+version: "1.0.0"
+
+budgets:
+  # Scan and mutate volume.
+  issuesScannedPerRun: 2000
+  issuesModifiedPerRun: 50
+  # Closure lifecycle.
+  closuresScheduledPerRun: 20
+  closuresExecutedPerRun: 20
+  duplicateClosuresPerRun: 25
+  # External work submitted per run.
+  reproductionSubmissionsPerRun: 100
+  quickFixPullRequestsPerRun: 3
+  # Infrastructure ceilings.
+  batchSize: 50
+  githubApiCallsPerRun: 5000
+  llmCallsPerRun: 300
+  # Notification ceilings, per hour.
+  slackMessagesPerHour: 120
+  individualMentionsPerHour: 30

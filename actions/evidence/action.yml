@@ -1,0 +1,172 @@
+# evidence — build one RunEvidenceBundle and POST it to the orchestrator.
+#
+# The bundle shape is packages/contracts/src/run-evidence.ts
+# (RunEvidenceBundle). Everything the runner
+# sends is UNTRUSTED INPUT to the orchestrator: a bundle asserts what this run
+# claims happened, it is not authority.
+#
+# The bundle names the repository the run belongs to (`repository`, from
+# GITHUB_REPOSITORY). The orchestrator refuses evidence whose repository is
+# not the one the attempt was dispatched to.
+#
+# Run this action only from a job in which no agent and no code from the
+# repository under test has run: the evidence token and the access-proxy
+# secret are in its environment. The programme workflows post evidence from a
+# separate job, with this action checked out fresh at the commit the agent
+# job recorded before its agent started.
+#
+# Delivery is best-effort by design: the POST retries 3x and a non-2xx is a
+# warning, never a failure — a copy of every bundle is appended to
+# $RUNNER_TEMP/evidence/ and the calling workflow uploads that directory as
+# the `programme-evidence` artifact, which is the orchestrator's fallback read
+# path (files *.json, <=512KB each, <=50 files, <=10MB zip).
+
+name: programme-evidence
+description: Build a RunEvidenceBundle JSON, POST it to the orchestrator, and keep a copy for the programme-evidence artifact.
+
+inputs:
+  phase:
+    description: "red | green | refactor | checks"
+    required: true
+  attempt_id:
+    description: QuickFixAttempt id echoed from the dispatch input.
+    required: true
+  orchestrator_url:
+    description: Base URL of the Lexi orchestrator (no trailing slash).
+    required: true
+  token:
+    description: evidence_token bearer value.
+    required: true
+  checks_json:
+    description: JSON array of RunCheckResult ({name,status,detail?,durationMs?}).
+    required: false
+    default: ""
+  failing_tests_json:
+    description: JSON array of FailingTestProof ({testName,file?,failureOutput,acceptanceCriterionId?}).
+    required: false
+    default: ""
+  commit_sha:
+    description: Commit the evidence was produced against.
+    required: false
+    default: ""
+  artifacts_json:
+    description: JSON array of RunEvidenceArtifact ({type,uri,sha256?,label?}).
+    required: false
+    default: ""
+  cf_access_client_id:
+    description: >
+      Cloudflare Access service-token client id, when the orchestrator is
+      behind Zero Trust. Without it a POST is answered with a 302 to a login
+      page, so the evidence is silently never ingested — and evidence that
+      never arrives reads downstream as a build that never reached its phase.
+    required: false
+    default: ""
+  cf_access_client_secret:
+    description: Cloudflare Access service-token client secret.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Build and POST the bundle
+      shell: bash
+      env:
+        PHASE: ${{ inputs.phase }}
+        ATTEMPT_ID: ${{ inputs.attempt_id }}
+        ORCH_URL: ${{ inputs.orchestrator_url }}
+        EVIDENCE_TOKEN: ${{ inputs.token }}
+        CHECKS_JSON: ${{ inputs.checks_json }}
+        FAILING_TESTS_JSON: ${{ inputs.failing_tests_json }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        ARTIFACTS_JSON: ${{ inputs.artifacts_json }}
+        CF_ACCESS_CLIENT_ID: ${{ inputs.cf_access_client_id }}
+        CF_ACCESS_CLIENT_SECRET: ${{ inputs.cf_access_client_secret }}
+      run: |
+        set -uo pipefail
+        mkdir -p "$RUNNER_TEMP/evidence"
+
+        # Optional JSON inputs: empty string means "absent", and anything that
+        # is not valid JSON is dropped with a warning rather than corrupting
+        # the bundle.
+        norm_json () {
+          local val="$1" label="$2"
+          if [ -z "$val" ]; then echo "null"; return; fi
+          if echo "$val" | jq -e 'type == "array"' > /dev/null 2>&1; then
+            echo "$val"
+          else
+            echo "::warning::${label} is not a JSON array; omitting it from the bundle." >&2
+            echo "null"
+          fi
+        }
+        CHECKS="$(norm_json "$CHECKS_JSON" checks_json)"
+        FAILING="$(norm_json "$FAILING_TESTS_JSON" failing_tests_json)"
+        ARTIFACTS="$(norm_json "$ARTIFACTS_JSON" artifacts_json)"
+
+        BUNDLE_FILE="$RUNNER_TEMP/evidence/${PHASE}-$(date +%s)-${GITHUB_RUN_ATTEMPT:-1}.json"
+        jq -n \
+          --arg attemptId "$ATTEMPT_ID" \
+          --arg phase "$PHASE" \
+          --arg workflowRunId "${GITHUB_RUN_ID:-}" \
+          --arg commitSha "$COMMIT_SHA" \
+          --arg reportedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg repository "${GITHUB_REPOSITORY:-}" \
+          --argjson checks "$CHECKS" \
+          --argjson failingTests "$FAILING" \
+          --argjson artifacts "$ARTIFACTS" \
+          '{attemptId: $attemptId, phase: $phase, workflowRunId: $workflowRunId, reportedAt: $reportedAt}
+           + (if $repository != "" then {repository: $repository} else {} end)
+           + (if $commitSha != "" then {commitSha: $commitSha} else {} end)
+           + (if $checks != null then {checks: $checks} else {} end)
+           + (if $failingTests != null then {failingTests: $failingTests} else {} end)
+           + (if $artifacts != null then {artifacts: $artifacts} else {} end)' \
+          > "$BUNDLE_FILE"
+        echo "Bundle written to $BUNDLE_FILE"
+
+        if [ -z "$ORCH_URL" ] || [ -z "$EVIDENCE_TOKEN" ]; then
+          echo "::warning::orchestrator_url or evidence token missing; skipping POST. The programme-evidence artifact remains the fallback channel."
+          exit 0
+        fi
+        # The token is only ever sent to the orchestrator, over https.
+        case "$ORCH_URL" in
+          https://*) ;;
+          *) echo "::warning::orchestrator_url is not https; refusing to send the evidence token to it. The programme-evidence artifact remains the fallback channel."; exit 0 ;;
+        esac
+
+        # Cloudflare Access service token. Array-built so an unset pair adds
+        # no headers rather than two empty ones.
+        CF_HEADERS=()
+        if [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:-}" ]; then
+          CF_HEADERS=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
+        fi
+
+        CODE=""
+        for i in 1 2 3; do
+          CODE="$(curl -sS -o "$RUNNER_TEMP/evidence-response.json" -w '%{http_code}' \
+            -X POST "${ORCH_URL%/}/api/evidence" \
+            -H "Authorization: Bearer ${EVIDENCE_TOKEN}" \
+            "${CF_HEADERS[@]+"${CF_HEADERS[@]}"}" \
+            -H "Content-Type: application/json" \
+            --max-time 30 \
+            --data @"$BUNDLE_FILE" || echo "000")"
+          case "$CODE" in
+            2*) break ;;
+            # Deliberately not retried three times in silence: a redirect is
+            # an auth verdict, not a transient failure, and retrying it just
+            # delays a run that will never post its evidence.
+            30*)
+              if [ ${#CF_HEADERS[@]} -eq 0 ]; then
+                echo "::error::Evidence POST got HTTP ${CODE} (redirect) and no Cloudflare Access service token was provided. Set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET; evidence is NOT being ingested."
+              else
+                echo "::error::Evidence POST got HTTP ${CODE} (redirect) despite a Cloudflare Access service token — the token is probably not admitted by the Access policy for this hostname. Evidence is NOT being ingested."
+              fi
+              break
+              ;;
+            *) echo "POST attempt ${i} returned ${CODE}; retrying..."; sleep $((i * 2)) ;;
+          esac
+        done
+        case "$CODE" in
+          2*) echo "Evidence (${PHASE}) accepted with HTTP ${CODE}." ;;
+          *) echo "::warning::Evidence POST (${PHASE}) failed after 3 attempts (last HTTP ${CODE}). The programme-evidence artifact is the fallback read path." ;;
+        esac
+        exit 0

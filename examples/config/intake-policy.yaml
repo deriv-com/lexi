@@ -1,0 +1,14 @@
+# Bug intake policy for the fictional "Acme" organisation.
+#
+# Intake decides, deterministically, whether a submitted bug is accepted, sent
+# to a human for review, or rejected. The model may extract fields from a
+# report; this file decides what happens to it.
+
+intake:
+  version: "1.0.0"
+  # A rejection is only automatic at or above this confidence. Anything less
+  # goes to a human with `reviewLabel`.
+  rejectConfidenceThreshold: 0.85
+  # Reports carrying any of these labels skip automation entirely.
+  securityLabels: [security, "lexi:security"]
+  reviewLabel: "lexi:review-intake"

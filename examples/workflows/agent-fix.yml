@@ -1,0 +1,80 @@
+# Copy into your repository as .github/workflows/agent-fix.yml.
+#
+# A thin caller: the work happens in the reusable workflow in this project (github.com/deriv-com/lexi).
+# Lexi (or anything else holding a token with actions:write on this repository)
+# starts it with workflow_dispatch.
+#
+# LEXI_APP_ID and LEXI_APP_PRIVATE_KEY here belong to the workflow App: a GitHub
+# App of its own, not the App Lexi's server uses. Give it Contents, Pull
+# requests and Issues write, Checks and Actions read, and no Actions write or
+# Workflows permission, and install it only on the repositories it fixes. The
+# agent can reach every token minted from it, so keep it that narrow.
+#
+# Pin `uses:` to a release tag or commit SHA rather than @main once one exists,
+# and set `lexi_ref` to the same ref so the scripts match the workflow.
+
+name: agent-fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      brief:
+        description: The bug report or task, verbatim.
+        required: true
+        type: string
+      requester:
+        description: Who asked.
+        required: true
+        type: string
+      thread_ref:
+        description: Conversation anchor for duplicate detection and follow-ups.
+        required: false
+        type: string
+        default: ""
+      scope_hint:
+        description: Optional path hint.
+        required: false
+        type: string
+        default: ""
+      resume_issue_number:
+        description: Existing issue to continue.
+        required: false
+        type: string
+        default: ""
+      resume_pr_number:
+        description: Existing PR to continue.
+        required: false
+        type: string
+        default: ""
+
+# The reusable workflow already queues runs per conversation thread, so no
+# concurrency block is needed here.
+
+permissions:
+  contents: read
+
+jobs:
+  fix:
+    uses: deriv-com/lexi/.github/workflows/agent-fix.yml@main
+    with:
+      brief: ${{ inputs.brief }}
+      requester: ${{ inputs.requester }}
+      thread_ref: ${{ inputs.thread_ref }}
+      scope_hint: ${{ inputs.scope_hint }}
+      resume_issue_number: ${{ inputs.resume_issue_number }}
+      resume_pr_number: ${{ inputs.resume_pr_number }}
+      # Everything below is optional. Uncomment what your repository needs.
+      # setup_command: npm ci
+      # node_version: "22"
+      # model: claude-sonnet-5-5
+      # model_base_url: https://llm-gateway.example.com
+      # branch_prefix: lexi/
+      # protected_paths_file: .lexi/protected-paths
+      # evidence_command: npm run test:e2e -- --reporter=html
+      # segment_minutes: 50        # agent time per token; at most 55
+      # claude_code_version: 2.1.319
+      lexi_ref: main
+    secrets:
+      app_id: ${{ secrets.LEXI_APP_ID }}
+      app_private_key: ${{ secrets.LEXI_APP_PRIVATE_KEY }}
+      model_api_key: ${{ secrets.LEXI_MODEL_API_KEY }}

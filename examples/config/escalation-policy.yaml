@@ -1,0 +1,47 @@
+# Escalation policy for the fictional "Acme" organisation.
+#
+# An issue nobody has touched climbs the ladder: its person in charge is tagged
+# first, then the team lead, then the manager, then the governance channel.
+# Every rung posts to the team channel and differs only in who is tagged.
+
+version: "1.0.0"
+enabled: true
+# Log what would be sent without sending it. Turn off once the ladder looks right.
+dryRun: true
+
+governance:
+  channelId: C0TEST03
+  channelName: "#acme-governance"
+
+ladder:
+  - rung: PIC
+    afterHours: 24
+  - rung: TEAM_LEAD
+    afterHours: 72
+  - rung: MANAGER
+    afterHours: 120
+  - rung: GOVERNANCE
+    afterHours: 168
+
+acknowledgement:
+  # A reaction or a thread reply on the notice stops the climb for that issue.
+  stopOnReaction: true
+  stopOnThreadReply: true
+  dedupePerSubject: true
+
+staleness:
+  # The agent's own comments do not count as progress.
+  excludeSelfWrites: true
+  selfActor: lexi-app
+  otherBotActors: []
+  minIdleHours: 24
+
+reminders:
+  scheduleCron: "0 9 * * 1-5"
+  maxPerSubjectPerDay: 1
+  dryRun: true
+  maxNotificationsPerRun: 10
+
+stalePr:
+  nudgeAfterDays: 7
+  autoCloseEnabled: false

@@ -1,0 +1,113 @@
+# app-token — mint a narrowed GitHub App installation token in ONE step.
+#
+# Why not actions/create-github-app-token: that action has a post step (it
+# revokes the token when the job ends), and a post step receives the action's
+# inputs — the App private key included — again, in its environment, at the
+# very end of the job. In a job that also runs a coding agent, the end of the
+# job comes after the agent: anything the agent left behind, or any runtime
+# file it replaced (the runner's own node, which post steps execute with),
+# sees the key. This action has no post step. The private key is in the
+# environment of this one step only, so a job that runs it BEFORE its agent
+# never exposes the key afterwards.
+#
+# Use it only before any agent or repository code has run in the job. Jobs
+# that never run an agent may use actions/create-github-app-token instead.
+#
+# The token is registered with ::add-mask:: before it is written anywhere.
+# Revoke it yourself once it has served its purpose, as the programme
+# workflows do: `curl -X DELETE "$GITHUB_API_URL/installation/token"` with the
+# token as bearer.
+
+name: programme-app-token
+description: Mint a repository-scoped, permission-narrowed GitHub App installation token without a post step.
+
+inputs:
+  app_id:
+    description: GitHub App id.
+    required: true
+  private_key:
+    description: GitHub App private key (PEM).
+    required: true
+  owner:
+    description: Owner (organization or user) of the repositories.
+    required: true
+  repositories:
+    description: Comma- or space-separated repository names under owner. The token is scoped to exactly these.
+    required: true
+  permissions:
+    description: >-
+      JSON object of permissions, e.g. {"contents":"read"}. The token carries
+      only these. Required and never empty: without it GitHub would grant every
+      permission the installation has, so the action mints nothing instead.
+    required: true
+
+outputs:
+  token:
+    description: The installation token (masked). Empty when it could not be minted; see `error`.
+    value: ${{ steps.mint.outputs.token }}
+  error:
+    description: Why no token was minted, when none was.
+    value: ${{ steps.mint.outputs.error }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mint the token
+      id: mint
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.app_id }}
+        PRIVATE_KEY: ${{ inputs.private_key }}
+        OWNER: ${{ inputs.owner }}
+        REPOSITORIES: ${{ inputs.repositories }}
+        PERMISSIONS: ${{ inputs.permissions }}
+      run: |
+        set -uo pipefail
+        fail () {
+          echo "token=" >> "$GITHUB_OUTPUT"
+          echo "error=$1" >> "$GITHUB_OUTPUT"
+          echo "::warning::App token not minted: $1"
+          exit 0
+        }
+        API="${GITHUB_API_URL:-https://api.github.com}"
+        [ -n "$APP_ID" ] && [ -n "$PRIVATE_KEY" ] || fail "app_id / private_key are not provisioned"
+        printf '%s' "$APP_ID" | grep -Eq '^[0-9]+$' || fail "app_id must be numeric"
+        printf '%s' "$OWNER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$' || fail "owner is not a GitHub account name"
+        REPOS_JSON="$(printf '%s' "$REPOSITORIES" | tr ',' ' ' | xargs -n1 2>/dev/null | jq -R . | jq -sc 'map(select(length > 0))')"
+        [ "$(jq 'length' <<< "$REPOS_JSON")" -gt 0 ] || fail "no repositories named"
+        jq -e 'all(.[]; test("^[A-Za-z0-9._-]{1,100}$"))' <<< "$REPOS_JSON" > /dev/null || fail "a repository name is malformed"
+        # Fail closed: a token request without permissions gets every
+        # permission the installation has, so no permission set, no token.
+        jq -e 'type == "object" and length > 0
+          and all(to_entries[]; (.key | test("^[a-z][a-z_]*$")) and (.value == "read" or .value == "write"))' <<< "$PERMISSIONS" > /dev/null 2>&1 \
+          || fail "permissions must be a non-empty JSON object of read/write"
+
+        b64url () { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+        NOW="$(date +%s)"
+        HEADER="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+        PAYLOAD="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$APP_ID" | b64url)"
+        # The key is read from a pipe, never written to disk.
+        SIG="$(printf '%s.%s' "$HEADER" "$PAYLOAD" \
+          | openssl dgst -sha256 -sign <(printf '%s\n' "$PRIVATE_KEY") 2>/dev/null | b64url)"
+        [ -n "$SIG" ] || fail "the private key could not sign (is it a PEM RSA key?)"
+        JWT="${HEADER}.${PAYLOAD}.${SIG}"
+        echo "::add-mask::${JWT}"
+
+        FIRST_REPO="$(jq -r '.[0]' <<< "$REPOS_JSON")"
+        INSTALLATION="$(curl -sS --max-time 30 -H "Authorization: Bearer ${JWT}" \
+          -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${API}/repos/${OWNER}/${FIRST_REPO}/installation" 2>/dev/null | jq -r '.id // empty' 2>/dev/null)"
+        printf '%s' "$INSTALLATION" | grep -Eq '^[0-9]+$' || fail "the App is not installed on ${OWNER}/${FIRST_REPO}"
+
+        BODY="$(jq -nc --argjson r "$REPOS_JSON" --argjson p "$PERMISSIONS" '{repositories: $r, permissions: $p}')"
+        RESPONSE="$(curl -sS --max-time 30 -X POST -H "Authorization: Bearer ${JWT}" \
+          -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+          --data "$BODY" "${API}/app/installations/${INSTALLATION}/access_tokens" 2>/dev/null)"
+        TOKEN="$(jq -r '.token // empty' <<< "$RESPONSE" 2>/dev/null)"
+        if [ -z "$TOKEN" ]; then
+          fail "GitHub refused the token request: $(jq -r '.message // "no message"' <<< "$RESPONSE" 2>/dev/null | head -c 200)"
+        fi
+        echo "::add-mask::${TOKEN}"
+        echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+        echo "error=" >> "$GITHUB_OUTPUT"
+        echo "Minted a token for ${OWNER}: $(jq -r 'join(", ")' <<< "$REPOS_JSON") with $(jq -c . <<< "$PERMISSIONS")."

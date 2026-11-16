@@ -1,0 +1,1067 @@
+# agent-fix — reusable workflow: investigate a bug report, fix it, open a PR,
+# wait for real CI, and publish exactly one machine-readable result.
+#
+# Called from a thin workflow in the target repository (see
+# examples/workflows/agent-fix.yml). The coding agent:
+#   1. investigates and states a root-cause hypothesis,
+#   2. files (or reuses) a GitHub issue with that hypothesis BEFORE writing code,
+#   3. implements the fix on a `<branch_prefix><topic>` branch and opens a PR,
+#   4. waits for the repository's real CI,
+#   5. writes either an announcement (shipped) or a hand-back (needs a human).
+#
+# This workflow never talks to chat. The dispatcher reads the result from the
+# run log between the AGENT_FIX_RESULT markers, or from the `agent-fix-<run>`
+# artifact, and relays it.
+#
+# What bounds the agent, which runs headlessly with permissions skipped:
+#   - a GitHub App token scoped to this repository (plus `extra_repositories`)
+#     and to contents/pull-requests/issues write, checks/actions read. The App
+#     private key never reaches the agent: tokens are minted in steps of their
+#     own, before each agent segment of at most `segment_minutes`, after every
+#     process the agent left running has been stopped (agent-sandbox.sh). No
+#     process that holds the key outlives its step;
+#   - an agent-only pre-push hook: branch prefix, and no change to a protected
+#     path (agent-fix/scripts/protected-paths.sh, or `protected_paths_file`);
+#   - the repository's own branch protection;
+#   - the job timeout and a per-thread concurrency group.
+#
+# Secrets:
+#   app_id / app_private_key  A GitHub App for these workflows only, separate
+#                             from the App the Lexi server uses, installed only on
+#                             the target repositories, with contents, pull
+#                             requests and issues write, checks and actions read,
+#                             and no Actions write or Workflows permission. A
+#                             GITHUB_TOKEN cannot be used: a PR it opens triggers
+#                             no workflows, so CI never runs.
+#   model_api_key             Key for the model endpoint. Sent as
+#                             ANTHROPIC_API_KEY, or as ANTHROPIC_AUTH_TOKEN when
+#                             `model_base_url` points at a gateway.
+
+name: agent-fix
+
+on:
+  workflow_call:
+    inputs:
+      brief:
+        description: The bug report or task, verbatim, including relevant thread replies.
+        required: true
+        type: string
+      requester:
+        description: Who asked, as the dispatcher knows them. Used only for attribution.
+        required: true
+        type: string
+      thread_ref:
+        description: Conversation anchor. Drives duplicate detection and follow-ups on the same thread.
+        required: false
+        type: string
+        default: ""
+      scope_hint:
+        description: Optional path hint, e.g. src/features/checkout. Verified, not trusted.
+        required: false
+        type: string
+        default: ""
+      resume_issue_number:
+        description: Existing issue to continue instead of filing a new one.
+        required: false
+        type: string
+        default: ""
+      resume_pr_number:
+        description: Existing PR to continue instead of opening a new one.
+        required: false
+        type: string
+        default: ""
+      runs_on:
+        description: 'JSON for runs-on, e.g. "ubuntu-latest" or {"group": "my-runners"}.'
+        required: false
+        type: string
+        default: '"ubuntu-latest"'
+      budget_minutes:
+        description: Job timeout. The last ten minutes are reserved for publishing the result.
+        required: false
+        type: number
+        default: 120
+      setup_command:
+        description: Shell command that installs dependencies, e.g. "npm ci". Empty skips it.
+        required: false
+        type: string
+        default: ""
+      setup_timeout_minutes:
+        description: Ceiling for setup_command.
+        required: false
+        type: number
+        default: 15
+      node_version:
+        description: Node.js version for the coding agent CLI (and the project, if it uses Node).
+        required: false
+        type: string
+        default: "22"
+      model:
+        description: Model the coding agent runs on.
+        required: false
+        type: string
+        default: claude-sonnet-5-5
+      model_base_url:
+        description: Optional model gateway URL (ANTHROPIC_BASE_URL). Empty means the provider's own endpoint.
+        required: false
+        type: string
+        default: ""
+      max_turns:
+        description: Turn cap for the coding agent.
+        required: false
+        type: number
+        default: 300
+      claude_code_version:
+        description: Exact npm version of @anthropic-ai/claude-code. Pinned so a new release cannot change what runs with your token; raise it deliberately.
+        required: false
+        type: string
+        default: 2.1.319
+      segment_minutes:
+        description: >-
+          The agent runs in segments of at most this many minutes (10 to 55), each
+          with a freshly minted token, because a token lasts an hour. Later segments
+          resume the same conversation. At most seven segments run.
+        required: false
+        type: number
+        default: 50
+      branch_prefix:
+        description: Every branch the agent pushes must start with this.
+        required: false
+        type: string
+        default: lexi/
+      extra_branch_prefixes:
+        description: Space-separated additional prefixes the agent may push to.
+        required: false
+        type: string
+        default: ""
+      protected_paths_file:
+        description: Repository file of glob patterns the agent may not change. Replaces the defaults when present.
+        required: false
+        type: string
+        default: .lexi/protected-paths
+      skill:
+        description: Skill the agent runs. The repository's .claude/skills/<skill> wins over the one shipped with Lexi.
+        required: false
+        type: string
+        default: fix
+      extra_repositories:
+        description: Space-separated repositories (same owner) the token also covers, e.g. submodules the fix may change.
+        required: false
+        type: string
+        default: ""
+      submodules:
+        description: Initialise submodules after the token is in place.
+        required: false
+        type: boolean
+        default: false
+      git_user_name:
+        description: Commit author name for the agent.
+        required: false
+        type: string
+        default: Lexi Agent
+      git_user_email:
+        description: Commit author email for the agent.
+        required: false
+        type: string
+        default: lexi-agent@users.noreply.github.com
+      evidence_command:
+        description: >-
+          Optional shell command run after a PR exists. It writes screenshots or
+          recordings into $EVIDENCE_DIR, which is uploaded as agent-fix-visuals-<run>.
+          Best-effort: it can never fail the run.
+        required: false
+        type: string
+        default: ""
+      evidence_timeout_minutes:
+        description: Ceiling for evidence_command.
+        required: false
+        type: number
+        default: 12
+      lexi_repository:
+        description: Repository holding these scripts and skills.
+        required: false
+        type: string
+        default: deriv-com/lexi
+      lexi_ref:
+        description: Ref of lexi_repository to take scripts and skills from. Pin it to the same ref as this workflow.
+        required: false
+        type: string
+        default: main
+    secrets:
+      app_id:
+        required: true
+      app_private_key:
+        required: true
+      model_api_key:
+        required: true
+    outputs:
+      result:
+        description: shipped or handback
+        value: ${{ jobs.fix.outputs.result }}
+
+jobs:
+  fix:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: ${{ inputs.budget_minutes }}
+    concurrency:
+      group: agent-fix-${{ github.repository }}-${{ inputs.thread_ref || inputs.resume_pr_number || inputs.resume_issue_number || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.publish.outputs.result }}
+    # An absolute path: a `bash` the agent put earlier on PATH never runs a step.
+    defaults:
+      run:
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+
+    steps:
+      # Write a fallback hand-back before anything can fail, so the dispatcher
+      # always has exactly one result to relay even if setup dies early.
+      - name: Seed result and deadline
+        env:
+          RAW_PAYLOAD: ${{ toJSON(inputs) }}
+          BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+        run: |
+          set -euo pipefail
+          # The final ten minutes are reserved for publishing the result.
+          echo "$(( $(date +%s) + (BUDGET_MINUTES - 10) * 60 ))" > /tmp/agent-fix-deadline-epoch
+          # Written before anything runs, so it cannot know why a run stopped.
+          # A step that stops the run on purpose replaces it with its reason.
+          cat > /tmp/handback.txt <<EOF
+          Agent-fix stopped before the agent produced a result, so no code was changed. The failed step on the run says what stopped it.
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          # Lets the finalize step tell whether anything replaced this seed.
+          cp /tmp/handback.txt /tmp/handback.seed
+          # Self-hosted runners: nothing from an earlier job may be resumed,
+          # appended to or revoked as if it were this job's.
+          rm -f /tmp/gh-token /tmp/agent-fix-session /tmp/agent-fix-segment.jsonl /tmp/run.jsonl
+          printf '%s' "$RAW_PAYLOAD" > /tmp/raw.json
+          # Keys only: never print the brief to the log.
+          jq -r 'keys[]' /tmp/raw.json
+
+      - name: Resolve settings
+        id: settings
+        env:
+          EXTRA_REPOSITORIES: ${{ inputs.extra_repositories }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          EXTRA_BRANCH_PREFIXES: ${{ inputs.extra_branch_prefixes }}
+          SKILL: ${{ inputs.skill }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+        run: |
+          set -euo pipefail
+          fail() {
+            printf '%s\nRun: %s/%s/actions/runs/%s\n' "$1" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+            echo "::error::$1"
+            exit 1
+          }
+          prefix_ok() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*/$'; }
+          prefix_ok "$BRANCH_PREFIX" || fail "Refused: branch_prefix '$BRANCH_PREFIX' must be a path ending in '/', e.g. 'lexi/'."
+          for p in $EXTRA_BRANCH_PREFIXES; do
+            prefix_ok "$p" || fail "Refused: extra branch prefix '$p' must be a path ending in '/'."
+          done
+          printf '%s' "$SKILL" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || fail "Refused: skill '$SKILL' is not a valid skill name."
+          # A segment must end before the token minted for it expires (an hour).
+          case "$SEGMENT_MINUTES" in
+            ''|*[!0-9]*) fail "Refused: segment_minutes '$SEGMENT_MINUTES' must be a whole number from 10 to 55." ;;
+          esac
+          if [ "$SEGMENT_MINUTES" -lt 10 ] || [ "$SEGMENT_MINUTES" -gt 55 ]; then
+            fail "Refused: segment_minutes '$SEGMENT_MINUTES' must be from 10 to 55."
+          fi
+
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          REPOS="$REPO"
+          for r in $EXTRA_REPOSITORIES; do
+            printf '%s' "$r" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "Refused: extra repository '$r' must be a bare repository name under ${OWNER}."
+            REPOS="$REPOS $r"
+          done
+          {
+            echo "owner=$OWNER"
+            echo "repositories=$REPOS"
+            echo "repositories_csv=$(printf '%s' "$REPOS" | tr ' ' ',')"
+          } >> "$GITHUB_OUTPUT"
+
+      # The job's own read-only token is enough to check out. The App token,
+      # which pushes, is minted further down, once the scripts that mint it are
+      # sealed.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout Lexi scripts and skills
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.lexi_repository }}
+          ref: ${{ inputs.lexi_ref }}
+          path: .lexi-agent
+          persist-credentials: false
+
+      # Sealed before any repository or agent code runs. The agent can edit any
+      # file this user can write, so every step that holds the App private key,
+      # or that has to stop the agent, checks this digest and runs its own
+      # fresh copy: an edited script is refused rather than run.
+      - name: Seal the scripts that handle secrets
+        id: trusted
+        run: |
+          set -euo pipefail
+          # The artifact redactor rides along (as scripts/redact-output.mjs):
+          # it runs after the agent, so it must be a copy the agent could not edit.
+          STAGE="$(/usr/bin/mktemp -d)"
+          /usr/bin/cp -R .lexi-agent/agent-fix/scripts "$STAGE/scripts"
+          /usr/bin/cp .lexi-agent/app-build/redact-output.mjs "$STAGE/scripts/redact-output.mjs"
+          /usr/bin/tar -czf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$STAGE" scripts
+          /usr/bin/rm -rf "$STAGE"
+          echo "sha=$(/usr/bin/sha256sum "${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize and validate request
+        run: |
+          set -euo pipefail
+          echo .lexi-agent >> .git/info/exclude
+          if ! bash .lexi-agent/agent-fix/scripts/normalize-payload.sh /tmp/raw.json > /tmp/ctx.json 2> /tmp/normalize-error.txt; then
+            {
+              echo "Agent-fix rejected the request."
+              cat /tmp/normalize-error.txt
+              echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            } > /tmp/handback.txt
+            cat /tmp/normalize-error.txt
+            exit 1
+          fi
+          jq -r 'keys[]' /tmp/ctx.json
+
+      # Installation tokens last an hour and nothing refreshes them in the
+      # background: a daemon holding the App private key for the whole job would
+      # be readable by the agent, which runs as the same user. This token serves
+      # the duplicate guard and setup; each agent segment gets its own below.
+      - name: Mint the GitHub App token
+        id: app-token
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          OUTPUT_NAME: token
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      # git reads the current token per operation through the credential helper
+      # and gh through a shim, so a token minted later is picked up without
+      # anything restarting. Nothing caches it.
+      - name: Route git and gh through the token file
+        run: |
+          set -euo pipefail
+          SCRIPTS="${GITHUB_WORKSPACE}/.lexi-agent/agent-fix/scripts"
+          # One App and one token for every repository, so a single fallback
+          # entry is enough and credential.useHttpPath is not needed.
+          echo "*=/tmp/gh-token" > /tmp/gh-credential-map
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global credential.https://github.com.username x-access-token
+          git config --global credential.https://github.com.helper "$SCRIPTS/gh-credential-helper.sh"
+
+          # gh takes its credential from GH_TOKEN per process and caches
+          # nothing, so a shim that re-reads the file per invocation keeps every
+          # gh call authenticated for the whole run.
+          REAL_GH=$(command -v gh)
+          mkdir -p /tmp/gh-shim
+          cat > /tmp/gh-shim/gh <<SHIM
+          #!/usr/bin/env bash
+          if [ -s /tmp/gh-token ]; then
+            GH_TOKEN=\$(cat /tmp/gh-token)
+            export GH_TOKEN
+            export GITHUB_TOKEN="\$GH_TOKEN"
+          fi
+          exec "$REAL_GH" "\$@"
+          SHIM
+          chmod +x /tmp/gh-shim/gh
+          echo /tmp/gh-shim >> "$GITHUB_PATH"
+          # The agent segments below run while this is "true"; each segment sets
+          # it again, after it has stopped everything the agent started.
+          echo "AGENT_CONTINUE=true" >> "$GITHUB_ENV"
+
+      # Search is only a candidate fetch. The exact `lexi-thread: <ref>` line
+      # decides duplication. One open PR is not a duplicate: it is the live PR
+      # for this thread, and the run continues on it. Several open PRs block. A
+      # leftover issue blocks only when there is no open PR to continue.
+      - name: Duplicate guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          REF=$(jq -r '.thread_ref // empty' /tmp/ctx.json)
+          RESUME=$(jq -r '.resume_issue_number // empty' /tmp/ctx.json)
+          if [ -z "$REF" ]; then
+            echo "No thread_ref supplied; skipping the thread duplicate guard."
+          else
+            gh pr list --search "$REF" --state open --limit 100 --json number,body > /tmp/pr-candidates.json
+            gh issue list --search "$REF" --state all --limit 100 --json number,body > /tmp/issue-candidates.json
+            # A jq program, not a shell expansion.
+            # shellcheck disable=SC2016
+            ANCHOR_FILTER='.[] | select(((.body // "") | split("\n") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "") | gsub("^_+|_+$"; "")) | index($anchor)) != null) | .number'
+            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" /tmp/pr-candidates.json > /tmp/pr_hits.txt
+            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" /tmp/issue-candidates.json > /tmp/issue_hits.txt
+
+            set +e
+            GUARD_OUT=$(bash .lexi-agent/agent-fix/scripts/duplicate-guard.sh /tmp/pr_hits.txt /tmp/issue_hits.txt "$RESUME")
+            GUARD_RC=$?
+            set -e
+            if [ "$GUARD_RC" -ne 0 ]; then
+              {
+                echo "This thread was already picked up; no second fix run was started."
+                echo "$GUARD_OUT"
+                echo "Thread: $REF"
+              } > /tmp/handback.txt
+              cat /tmp/handback.txt
+              exit 1
+            fi
+            case "$GUARD_OUT" in
+              CONTINUE:*)
+                PR_NUM=$(printf '%s' "$GUARD_OUT" | sed -n 's/^CONTINUE: pr=\([0-9][0-9]*\).*/\1/p')
+                [ -n "$PR_NUM" ] || { echo "duplicate-guard printed CONTINUE but no PR number" >&2; exit 1; }
+                if [ -z "$(jq -r '.resume_pr_number // empty' /tmp/ctx.json)" ]; then
+                  jq --arg pr "$PR_NUM" '.resume_pr_number = $pr' /tmp/ctx.json > /tmp/ctx.next.json
+                  mv /tmp/ctx.next.json /tmp/ctx.json
+                fi
+                echo "Continuing existing PR #$PR_NUM for this thread."
+                ;;
+            esac
+          fi
+          # A dispatcher that cannot set resume_pr_number may put
+          # "CONTINUE PR: <n>" on the first line of the brief instead.
+          if [ -z "$(jq -r '.resume_pr_number // empty' /tmp/ctx.json)" ]; then
+            HDR=$(jq -r '.brief' /tmp/ctx.json | sed -n 's/^CONTINUE PR: \([0-9][0-9]*\).*/\1/p' | head -1)
+            if [ -n "$HDR" ]; then
+              jq --arg pr "$HDR" '.resume_pr_number = $pr' /tmp/ctx.json > /tmp/ctx.next.json
+              mv /tmp/ctx.next.json /tmp/ctx.json
+              echo "Continuing PR #$HDR from the CONTINUE PR header."
+            fi
+          fi
+
+      - name: Checkout submodules
+        if: inputs.submodules
+        run: git submodule update --init --recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install project dependencies
+        if: inputs.setup_command != ''
+        timeout-minutes: ${{ inputs.setup_timeout_minutes }}
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        # The command runs the repository's code (install scripts included):
+        # everything it starts is stopped, and its file commands dropped,
+        # before the next minting step holds the App private key.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          source "$T/scripts/agent-sandbox.sh"
+          MARK=$(sandbox_mark)
+          RC=0
+          bash -euo pipefail -c "$SETUP_COMMAND" || RC=$?
+          STOP_RC=0
+          sandbox_stop "$MARK" || STOP_RC=$?
+          sandbox_reset_file_commands
+          if [ "$STOP_RC" -ne 0 ]; then
+            echo "::error::setup_command left processes running that could not be stopped."
+            exit 1
+          fi
+          exit "$RC"
+
+      - name: Install the coding agent CLI
+        env:
+          CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      - name: Configure git identity
+        env:
+          GIT_USER_NAME: ${{ inputs.git_user_name }}
+          GIT_USER_EMAIL: ${{ inputs.git_user_email }}
+        run: |
+          set -euo pipefail
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+
+      # Agent-only guards, installed for this job through core.hooksPath. Not
+      # the repository's own hook, which is shared with human developers who
+      # may push any branch and edit any file.
+      - name: Install agent push guards
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          EXTRA_BRANCH_PREFIXES: ${{ inputs.extra_branch_prefixes }}
+          PROTECTED_PATHS_FILE: ${{ inputs.protected_paths_file }}
+        run: |
+          set -euo pipefail
+          # Recorded so cleanup can restore it exactly. Empty means unset.
+          PRIOR=$(git config --local --get core.hooksPath 2>/dev/null || true)
+          printf '%s' "$PRIOR" > "${RUNNER_TEMP}/prior-hooks-path"
+          HOOKS="${RUNNER_TEMP}/lexi-hooks"
+          mkdir -p "$HOOKS"
+          cp .lexi-agent/agent-fix/scripts/pre-push .lexi-agent/agent-fix/scripts/protected-paths.sh "$HOOKS/"
+          chmod +x "$HOOKS/pre-push"
+
+          PROTECTED=""
+          if [ -n "$PROTECTED_PATHS_FILE" ] && [ -f "$PROTECTED_PATHS_FILE" ]; then
+            # Copied out of the checkout, so the agent cannot edit the list it
+            # is checked against.
+            cp "$PROTECTED_PATHS_FILE" "$HOOKS/protected-paths.list"
+            PROTECTED="$HOOKS/protected-paths.list"
+          fi
+          # The repository's own pre-push hook is chained first, wherever git
+          # would have looked for it.
+          REPO_HOOKS="${PRIOR:-.git/hooks}"
+          {
+            printf 'LEXI_BRANCH_PREFIX=%q\n' "$BRANCH_PREFIX"
+            printf 'LEXI_EXTRA_BRANCH_PREFIXES=%q\n' "$EXTRA_BRANCH_PREFIXES"
+            printf 'LEXI_PROTECTED_PATHS_FILE=%q\n' "$PROTECTED"
+            printf 'LEXI_REPO_HOOKS_DIR=%q\n' "$REPO_HOOKS"
+          } > "$HOOKS/guard.env"
+          git config core.hooksPath "$HOOKS"
+          echo "Agent push guards installed at $HOOKS"
+          echo "protected=$PROTECTED" >> "$GITHUB_ENV"
+
+      # Hard stop before the agent starts, for the case knowable this early: a
+      # brief that names a protected file. The pre-push hook covers the rest.
+      - name: Refuse a brief that targets a protected path
+        run: |
+          set -euo pipefail
+          export LEXI_PROTECTED_PATHS_FILE="${protected:-}"
+          if bash .lexi-agent/agent-fix/scripts/check-brief.sh /tmp/ctx.json 2>/tmp/check-brief.err; then
+            cat /tmp/check-brief.err >&2 || true
+            exit 0
+          fi
+          cat /tmp/check-brief.err >&2
+          {
+            echo "Refused before starting: the brief names a path this workflow does not let an agent edit, so no code was changed."
+            echo "If the fix needs that file changed, a person has to make the change. Rewording the brief will not let the agent edit it, and its push would be refused."
+            echo "If the brief only mentions the file and the fix does not touch it, take the name out of the brief and dispatch again."
+            echo ""
+            sed 's/^/  /' /tmp/check-brief.err
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > /tmp/handback.txt
+          exit 1
+
+      - name: Install the skill
+        env:
+          SKILL: ${{ inputs.skill }}
+        run: |
+          set -euo pipefail
+          if [ -f ".claude/skills/${SKILL}/SKILL.md" ]; then
+            echo "Using the repository's own .claude/skills/${SKILL}."
+          elif [ -f ".lexi-agent/skills/${SKILL}/SKILL.md" ]; then
+            mkdir -p .claude/skills
+            cp -R ".lexi-agent/skills/${SKILL}" ".claude/skills/${SKILL}"
+            echo ".claude/skills/${SKILL}" >> .git/info/exclude
+            echo "Installed Lexi's ${SKILL} skill."
+          else
+            printf 'Agent-fix has no skill named %s, so no code was changed.\nRun: %s/%s/actions/runs/%s\n' \
+              "$SKILL" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+            exit 1
+          fi
+
+      # The agent, in segments. Each segment is preceded by a step that mints a
+      # fresh token (the only steps that hold the App private key), and ends by
+      # stopping every process the agent started, however it detached, and by
+      # discarding anything it wrote to GITHUB_ENV, GITHUB_PATH or GITHUB_OUTPUT
+      # (run-agent-segment.sh). It then sets AGENT_CONTINUE. A failed segment
+      # skips the rest, so no token is minted while anything of the agent's could
+      # still be running. The pairs are identical; seven of them cover the
+      # longest job GitHub allows.
+      - name: Mint a fresh token (agent segment 1)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 1)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 1 7
+
+      - name: Mint a fresh token (agent segment 2)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 2)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 2 7
+
+      - name: Mint a fresh token (agent segment 3)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 3)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 3 7
+
+      - name: Mint a fresh token (agent segment 4)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 4)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 4 7
+
+      - name: Mint a fresh token (agent segment 5)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 5)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 5 7
+
+      - name: Mint a fresh token (agent segment 6)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 6)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 6 7
+
+      - name: Mint a fresh token (agent segment 7)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.settings.outputs.owner }}
+          REPOSITORIES: ${{ steps.settings.outputs.repositories }}
+          # Must match what the workflow documents; the agent gets no more.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
+          TOKEN_FILE: /tmp/gh-token
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/gh-token-mint.sh"
+
+      - name: Run the coding agent (segment 7)
+        if: env.AGENT_CONTINUE == 'true'
+        env:
+          MODEL: ${{ inputs.model }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          SKILL: ${{ inputs.skill }}
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+          # Deliberately no GH_TOKEN: a literal token is frozen when the step
+          # starts; the gh shim on PATH supplies the current one per call.
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          exec /bin/bash "$T/scripts/run-agent-segment.sh" 7 7
+
+      - name: Finalize result contract
+        if: always()
+        run: |
+          set -euo pipefail
+          ANNOUNCEMENT=false
+          HANDBACK=false
+          [ -s /tmp/announcement.txt ] && ANNOUNCEMENT=true
+          [ -s /tmp/handback.txt ] && HANDBACK=true
+
+          # When nothing replaced the seed hand-back, name the step that failed
+          # so the requester is told which check stopped the run. Best-effort:
+          # this step must never fail, because it is what publishes a result.
+          if [ -f /tmp/handback.seed ] && cmp -s /tmp/handback.seed /tmp/handback.txt; then
+            if [ -s /tmp/gh-token ]; then
+              GH_TOKEN=$(cat /tmp/gh-token)
+              export GH_TOKEN
+            fi
+            FAILED_STEP=""
+            if [ -n "${GH_TOKEN:-}" ]; then
+              FAILED_STEP=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" \
+                --jq '[.jobs[]?.steps[]? | select(.conclusion == "failure") | .name] | first // empty' \
+                2>/dev/null) || FAILED_STEP=""
+            fi
+            if [ -n "$FAILED_STEP" ]; then
+              printf 'Agent-fix stopped before the agent produced a result: the step "%s" failed, so no code was changed.\nRun: %s/%s/actions/runs/%s\n' \
+                "$FAILED_STEP" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+            fi
+          fi
+
+          if [ "$ANNOUNCEMENT" = true ] && [ "$HANDBACK" = true ]; then
+            rm -f /tmp/announcement.txt
+            printf 'Agent-fix produced both result files, which breaks its output contract. Treat the run as a hand-back and read the agent log before retrying.\nRun: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+          elif [ "$ANNOUNCEMENT" = false ] && [ "$HANDBACK" = false ]; then
+            printf 'Agent-fix ended without a result. Read the failed step or the agent log before retrying.\nRun: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+          fi
+
+          # Guarded: a failure before the scripts were checked out leaves only
+          # the seed hand-back, which is still an honest result.
+          if [ -f .lexi-agent/agent-fix/scripts/check-output-contract.sh ]; then
+            bash .lexi-agent/agent-fix/scripts/check-output-contract.sh /tmp/announcement.txt /tmp/handback.txt
+          else
+            echo "check-output-contract.sh unavailable; relying on the seed hand-back."
+          fi
+
+      # The result goes to the step summary (for people) and to the log between
+      # fixed markers (for the dispatcher, which reads job logs).
+      - name: Publish result
+        id: publish
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -s /tmp/announcement.txt ] && [ ! -s /tmp/handback.txt ]; then
+            { echo "### Shipped"; cat /tmp/announcement.txt; } >> "$GITHUB_STEP_SUMMARY"
+            echo "===== AGENT_FIX_RESULT: SHIPPED ====="
+            cat /tmp/announcement.txt
+            echo "===== END_AGENT_FIX_RESULT ====="
+            echo "result=shipped" >> "$GITHUB_OUTPUT"
+          elif [ -s /tmp/handback.txt ] && [ ! -s /tmp/announcement.txt ]; then
+            { echo "### Handed back: needs a human"; cat /tmp/handback.txt; } >> "$GITHUB_STEP_SUMMARY"
+            echo "===== AGENT_FIX_RESULT: HANDBACK ====="
+            cat /tmp/handback.txt
+            echo "===== END_AGENT_FIX_RESULT ====="
+            echo "result=handback" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Final result contract is invalid"
+            exit 1
+          fi
+
+      # On a self-hosted runner the checkout is reused. A core.hooksPath left
+      # pointing at the deleted RUNNER_TEMP directory would silently disable
+      # every git hook for the next job: git does not warn when hooksPath names
+      # a directory that does not exist.
+      - name: Remove agent push guards
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -d .git ] || { echo "No checkout here; nothing to restore."; exit 0; }
+          PRIOR=""
+          [ -f "${RUNNER_TEMP}/prior-hooks-path" ] && PRIOR=$(cat "${RUNNER_TEMP}/prior-hooks-path")
+          if [ -n "$PRIOR" ]; then
+            git config core.hooksPath "$PRIOR"
+            echo "Restored core.hooksPath to ${PRIOR}"
+          else
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
+            echo "Cleared core.hooksPath (there was no local setting before this job)."
+          fi
+
+      # The transcript and the result files are the agent's raw output, and
+      # ::add-mask:: hides a secret from the log, not from a file. They are
+      # redacted in place before upload: by value for what the agent held (the
+      # model key and the current token, read here before it is revoked), by
+      # shape for every other GitHub token and private key. If the redaction
+      # fails, the upload below does not run.
+      - name: Redact the agent's output
+        id: redact
+        if: always()
+        continue-on-error: true
+        env:
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LEXI_TRUSTED_SHA:-}" ]; then
+            # The run stopped before the scripts were sealed: no agent ran, so
+            # the files hold only what the workflow itself wrote.
+            echo "No agent ran; nothing to redact."
+            exit 0
+          fi
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          GH_TOKEN=""
+          if [ -f /tmp/gh-token ] && [ ! -L /tmp/gh-token ]; then GH_TOKEN=$(tr -d '\r\n' < /tmp/gh-token); fi
+          export GH_TOKEN
+          node "$T/scripts/redact-output.mjs" --files \
+            /tmp/investigation.txt /tmp/announcement.txt /tmp/handback.txt /tmp/run.jsonl
+
+      # Every earlier token was revoked when the next one was minted; this one
+      # is revoked rather than left live for up to an hour.
+      - name: Revoke the GitHub token
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -s /tmp/gh-token ]; then
+            curl -q -sS -X DELETE "${GITHUB_API_URL:-https://api.github.com}/installation/token" \
+              -H "Authorization: Bearer $(cat /tmp/gh-token)" \
+              -H "Accept: application/vnd.github+json" >/dev/null 2>&1 || true
+            rm -f /tmp/gh-token
+          fi
+          rm -f /tmp/gh-credential-map
+          # Global git config outlives the job on a self-hosted runner.
+          git config --global --unset-all credential.https://github.com.helper 2>/dev/null || true
+          git config --global --unset-all credential.https://github.com.username 2>/dev/null || true
+
+      - name: Upload result artifact
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-fix-${{ github.run_id }}
+          path: |
+            /tmp/investigation.txt
+            /tmp/announcement.txt
+            /tmp/handback.txt
+            /tmp/run.jsonl
+          if-no-files-found: error
+
+      # Visual evidence for the reviewer: runs when a PR exists, whether the
+      # agent shipped or handed back with a PR open. Never allowed to affect the
+      # result: continue-on-error and its own timeout.
+      - name: Capture visual evidence
+        id: evidence
+        if: always() && inputs.evidence_command != ''
+        continue-on-error: true
+        timeout-minutes: ${{ inputs.evidence_timeout_minutes }}
+        env:
+          EVIDENCE_COMMAND: ${{ inputs.evidence_command }}
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          if [ -s /tmp/announcement.txt ] || grep -qE 'https://github.com/[^[:space:]]+/pull/[0-9]+' /tmp/handback.txt 2>/dev/null; then
+            PR=true
+          else
+            echo "No PR to show; nothing to capture."
+            echo "pr=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The command runs the repository's code: it is stopped, and its file
+          # commands dropped, before the upload steps after it start.
+          source "$T/scripts/agent-sandbox.sh"
+          MARK=$(sandbox_mark)
+          export EVIDENCE_DIR="${GITHUB_WORKSPACE}/.lexi-agent-evidence"
+          mkdir -p "$EVIDENCE_DIR"
+          echo .lexi-agent-evidence >> .git/info/exclude
+          bash -euo pipefail -c "$EVIDENCE_COMMAND" || echo "::warning::evidence capture did not complete; continuing"
+          sandbox_stop "$MARK" || echo "::warning::some processes the evidence command started could not be stopped"
+          sandbox_reset_file_commands
+          echo "pr=${PR}" >> "$GITHUB_OUTPUT"
+          echo "::group::evidence captured"
+          ls -la "$EVIDENCE_DIR" || true
+          echo "::endgroup::"
+
+      # Screenshots cannot be edited: a file there that holds a credential, in
+      # any form or shape, is deleted rather than uploaded.
+      - name: Redact the visual evidence
+        id: redact-evidence
+        if: always() && steps.evidence.outputs.pr == 'true'
+        continue-on-error: true
+        env:
+          MODEL_API_KEY: ${{ secrets.model_api_key }}
+          LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
+        run: |
+          set -euo pipefail
+          T=$(/usr/bin/mktemp -d)
+          echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
+          node "$T/scripts/redact-output.mjs" --files "${GITHUB_WORKSPACE}/.lexi-agent-evidence"
+
+      - name: Upload visual evidence
+        if: always() && steps.evidence.outputs.pr == 'true' && steps.redact-evidence.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-fix-visuals-${{ github.run_id }}
+          path: ${{ github.workspace }}/.lexi-agent-evidence/
+          if-no-files-found: ignore

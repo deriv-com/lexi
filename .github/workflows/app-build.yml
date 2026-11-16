@@ -1,0 +1,1509 @@
+# app-build — one builder builds a whole app (reusable workflow).
+#
+# One Claude Code session with the whole app in view builds `app/<web|mobile>`
+# on ONE branch, so there are no sibling branches, no merge conflicts and no
+# stitching task. What it
+# builds and how is in the app's BUILD.md, owned by the product repo; this
+# file is only the loop around it.
+#
+# One run is one SESSION of up to three SEGMENTS, with a push between segments
+# so the PR preview redeploys while the builder keeps working.
+#
+# Phases (inputs.phases = "true"): intent → spec → plan → build, recorded in
+# <app>/docs/build/PHASE. The planning phases run on `plan_model`, each segment
+# in a fresh conversation, and each ends at a PHASE GATE: an independent
+# read-only reviewer on `review_model` whose pass is the approval (there is no
+# human approval). The build phase runs on `model`. Without `phases`, the
+# whole run is the build phase, as before.
+#
+# Jobs:
+#   build  — the segments, the pushes, the session report, and the decision
+#            whether the loop goes on.
+#   next   — (inputs.chain = "true") dispatches the next session as soon as
+#            `build` ends. It does not wait for `assess`, so the builder never
+#            sits idle through the checks (checks and review can take over an
+#            hour, enough to push a session past the 6-hour job limit).
+#   assess — the light checks and an independent code review of the session,
+#            posted as an assessment comment. The next session's segments read
+#            the latest one (feedback.sh) and fix it first. Report-only.
+#
+# Gate: vars.LEXI_APP_BUILD_ENABLED == "true" on the calling repository.
+#
+# Stops when: PROGRESS.md's first line is `Status: done` in the build phase;
+# the PR carries `app-build:stop` or is closed (honoured at session start and
+# at every segment boundary); `max_sessions` is reached; a phase gate failed
+# `max_gate_attempts` times; or a session made no progress at all.
+#
+# Cancelling the run stops it at once. Every step after the first segment is
+# guarded with `!cancelled()`, never `always()`: `always()` runs even after a
+# cancel, which would carry a cancelled run straight into its next segment.
+# Only the log redaction and upload use `always()`; the upload runs only
+# when the redaction succeeded.
+#
+# Feedback: comments on the build PR (this repository's own branch, never a
+# fork's PR from a branch of the same name) from the logins in
+# `feedback_authors`. `*` admits people whose association with the repository
+# is OWNER, MEMBER or COLLABORATOR; bots and anyone else must be named.
+# Each segment gets the next bounded batch of comments not delivered before
+# (vars LEXI_FEEDBACK_BATCH_BYTES / LEXI_FEEDBACK_BATCH_TOKENS, defaults 30000 /
+# 10000), with the prompt on the builder's stdin. <docs>/FEEDBACK_CURSOR.json on
+# the build branch records what was processed; it advances only after the
+# builder processed a batch, so a failed segment gets the same comments again.
+# `replay_from_comment` (or the repository variable LEXI_FEEDBACK_REPLAY_FROM)
+# delivers again from a given comment without rewinding the cursor.
+#
+# Tracks (inputs.track): several builders on one app at once, after a shared
+# shell exists. Each track is its own loop: its own branch
+# (<branch_prefix><app>-<track>), draft PR, concurrency slot and documents
+# (<app>/docs/build/tracks/<track>/), and owns only the folders BUILD.md's
+# "Tracks" section gives it. Without `track`, one builder owns the whole app,
+# as before.
+#
+# Fleet (inputs.fleet_size): inside a session the builder leads up to N
+# sub-agents, each in its own git worktree with its own file ownership, and
+# merges their work before the segment ends (fleet.md).
+#
+# Gate mode (inputs.gate_mode): "blocking" fails a phase until it passes or
+# stops the loop after `max_gate_attempts`; "advisory" judges each phase once,
+# moves on either way, carries the findings into the next phase and posts them
+# to Slack (secret slack_webhook_url) so a person can step in. The verdict is
+# posted from a step of its own after the segment, never from the builder's
+# step, whose environment the builder can read.
+#
+# Model access: the builder is Claude Code. It talks to the endpoint in
+# `model_base_url` (an Anthropic-compatible gateway, or https://api.anthropic.com)
+# with the `model_token` secret as its auth token.
+#
+# Scripts: every step runs the scripts under app-build/ from `lexi_repository`
+# at `lexi_ref`; pin `lexi_ref` to the same ref as this workflow.
+#
+# Credentials: the builder holds the job's read-only GITHUB_TOKEN, the model
+# token and, in build-phase segments only, the staging and Mailisk secrets. It
+# commits locally; the workflow mints a fresh App token for every push (tokens
+# last 60 minutes and a session lasts hours) with gh-token-mint.sh, in a step of
+# its own. The App private key is never in the builder's step or in any process
+# that outlives its step: each segment ends by stopping every process the
+# builder started, putting back the git configuration it could have planted a
+# hook in, and dropping what it wrote to GITHUB_ENV/GITHUB_PATH/GITHUB_OUTPUT
+# (segment.sh). A segment that fails that (its step fails) blocks every later
+# mint and Slack post in the job. The scripts are sealed in an archive before
+# any builder runs, and every step after one verifies it and unpacks a fresh
+# copy. Staging accounts are optional; when given, every push is refused if a
+# new commit contains any of their values.
+name: app-build
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: '"web" or "mobile".'
+        required: true
+        type: string
+      app_label:
+        description: What the builder calls the app in prompts, the PR and reports. Empty = "the web app" / "the mobile app".
+        required: false
+        default: ""
+        type: string
+      session:
+        description: Session number, starting at 1.
+        required: false
+        default: "1"
+        type: string
+      max_sessions:
+        required: false
+        default: "20"
+        type: string
+      segments:
+        description: Segments per session (1-3).
+        required: false
+        default: "3"
+        type: string
+      segment_minutes:
+        description: Minutes per build-phase segment.
+        required: false
+        default: "85"
+        type: string
+      model:
+        description: The build-phase model.
+        required: false
+        default: claude-opus-5-5
+        type: string
+      effort:
+        description: claude --effort for the build phase (low | medium | high | xhigh | max); empty = CLI default.
+        required: false
+        default: high
+        type: string
+      phases:
+        description: '"true" = run intent → spec → plan before build, each behind a phase gate.'
+        required: false
+        default: "false"
+        type: string
+      plan_model:
+        description: The model for the intent, spec and plan phases. Empty = `model`.
+        required: false
+        default: ""
+        type: string
+      plan_effort:
+        description: claude --effort for the planning phases. Empty = `effort`.
+        required: false
+        default: ""
+        type: string
+      plan_segment_minutes:
+        description: Minutes per planning segment (each is followed by its gate).
+        required: false
+        default: "60"
+        type: string
+      review_model:
+        description: The model for the phase gates and the code review. Empty = `model`.
+        required: false
+        default: ""
+        type: string
+      review_effort:
+        description: claude --effort for the gates and the review. Empty = `effort`.
+        required: false
+        default: ""
+        type: string
+      max_gate_attempts:
+        description: Failed gates of one phase before the loop stops for a person.
+        required: false
+        default: "3"
+        type: string
+      resume_segments:
+        description: '"true" = build segments resume one conversation; "false" = each segment starts fresh from the files (cheaper: a resumed conversation re-reads its whole history every turn).'
+        required: false
+        default: "true"
+        type: string
+      chain:
+        description: '"true" = this workflow dispatches the next session itself (the caller must grant actions:write and must not chain too). Lets the checks run beside the next session.'
+        required: false
+        default: "false"
+        type: string
+      caller_workflow:
+        description: The caller's workflow file, dispatched for the next session when `chain` is "true".
+        required: false
+        default: app-build.yml
+        type: string
+      base_branch:
+        required: false
+        default: main
+        type: string
+      runner:
+        required: false
+        default: ubuntu-latest
+        type: string
+      flutter_version:
+        required: false
+        default: 3.47.5
+        type: string
+      feedback_authors:
+        description: >-
+          GitHub logins (comma-separated) whose PR comments reach the builder as
+          feedback. `*` admits every person (not bots) who can comment; name any
+          bot that should be heard. Everyone else is ignored. Empty = no feedback.
+        required: false
+        default: ""
+        type: string
+      source_repositories:
+        description: Other repositories the run reads (the submodules' repositories), comma-separated, same owner.
+        required: false
+        default: ""
+        type: string
+      submodules:
+        description: The submodule paths the builder reads, space- or comma-separated.
+        required: false
+        default: ""
+        type: string
+      track_sources:
+        description: '"true" = move each submodule to the tip of its `.gitmodules` branch at the start of every session, and tell the builder what changed.'
+        required: false
+        default: "false"
+        type: string
+      reference_repositories:
+        description: >-
+          Repositories the builder may read and borrow from but never writes to
+          (for example the production app), comma-separated `owner/repo`, all
+          under ONE owner. Cloned read-only into reference/<repo>; needs the
+          builder App installed on them with contents:read. Empty = none.
+        required: false
+        default: ""
+        type: string
+      intake_label:
+        description: >-
+          Label of the feature-intake issues to build from (for example
+          "ready-for-agent"). Every open issue carrying it that the intake
+          workflow filed, or that a `feedback_authors` person opened, is copied
+          read-only into intake/ each session, with the comments of
+          `feedback_authors` and the screenshots from the lexi/intake-assets
+          branch. Empty = none.
+        required: false
+        default: ""
+        type: string
+      prototype_dir:
+        description: Submodule holding a Next.js prototype to serve on :4000 for comparison. Empty = none.
+        required: false
+        default: ""
+        type: string
+      track:
+        description: >-
+          A track of the app built beside other tracks (lowercase letters,
+          digits and dashes), for example "cashier". Its own branch
+          <branch_prefix><app>-<track>, PR, concurrency slot and documents under
+          <app>/docs/build/tracks/<track>/; its scope is the matching entry of
+          BUILD.md's "Tracks" section. Empty = one builder for the whole app.
+        required: false
+        default: ""
+        type: string
+      fleet_size:
+        description: >-
+          "0" = the builder works alone (it may still use a sub-agent for a
+          side task). "2"-"8" = it leads a fleet of up to that many sub-agents,
+          each in its own git worktree with its own files (fleet.md).
+        required: false
+        default: "0"
+        type: string
+      gate_mode:
+        description: '"blocking" = a failed phase gate repeats the phase (up to max_gate_attempts, then the loop stops). "advisory" = each phase is judged once and moves on; the findings go to the next phase and to Slack.'
+        required: false
+        default: blocking
+        type: string
+      tests:
+        description: '"e2e" = unit tests plus end-to-end journey tests. "unit" = run unit and component tests only; write browser suites only where BUILD.md assigns that work to the builder.'
+        required: false
+        default: e2e
+        type: string
+      browser_check:
+        description: >-
+          "true" = the builder runs the app and looks at every screen in a
+          headless browser (the Playwright MCP server) before calling it done.
+          "false" = no browser at all: no browser tools, no screenshots, no
+          Chromium install; screens are built from the spec, the intake
+          screenshots and the reference code, and proven by unit and component
+          tests. The assess job's own checks are unaffected.
+        required: false
+        default: "true"
+        type: string
+      assess_browser:
+        description: >-
+          "false" = the assess job does not install a browser or run the app's
+          browser, visual, accessibility or performance suites (test:e2e,
+          lexi:journeys, test:visual and the rest); it runs install, type
+          check, lint, unit tests, build and the code review only.
+        required: false
+        default: "true"
+        type: string
+      stop_at_phase:
+        description: >-
+          Stop the loop when the build reaches this phase (spec, plan or build),
+          for example "build" to plan now and build later. Start it again with
+          restart_phase set to the same phase. Passed on to every session.
+        required: false
+        default: ""
+        type: string
+      fleet_light_model:
+        description: >-
+          A cheaper model for routine sub-agent items (copy, display-only
+          screens, tests for existing code), mapped to the `haiku` alias.
+          Empty = every sub-agent runs on `model`.
+        required: false
+        default: ""
+        type: string
+      assess_model:
+        description: The model for the per-session code review in the assess job. Empty = review_model.
+        required: false
+        default: ""
+        type: string
+      assess_every:
+        description: Run the assess job (checks and code review) every Nth session; "1" = every session.
+        required: false
+        default: "1"
+        type: string
+      sync_base:
+        description: >-
+          "true" = merge the base branch into the build branch at the start of
+          every session, so a track sees the shared shell and BUILD.md as they
+          land on the base. A fetch that fails after retries, or any merge failure,
+          stops the loop before it builds under stale instructions.
+        required: false
+        default: "false"
+        type: string
+      restart_phase:
+        description: >-
+          Rewind the build to this phase (intent, spec, plan or build) at the
+          start of this session, for example "spec" after widening BUILD.md's
+          scope. Clears a `Status: done` line and starts the phase's gate count
+          afresh. Only the first session of a restart should pass it.
+        required: false
+        default: ""
+        type: string
+      replay_from_comment:
+        description: >-
+          Deliver the PR's feedback again from this comment on, in the same
+          batches, for example after feedback was missed. A comment number,
+          comment:/review:/inline:<number>, or a node ID (IC_..., PRR_...,
+          PRRC_...). Nothing is rewound: the request is saved in the build
+          branch's FEEDBACK_CURSOR.json and continues across sessions until
+          done, so only the first session of a replay should pass it; or set
+          the repository variable LEXI_FEEDBACK_REPLAY_FROM instead.
+        required: false
+        default: ""
+        type: string
+      model_base_url:
+        description: Anthropic-compatible model endpoint Claude Code talks to (ANTHROPIC_BASE_URL), for example https://api.anthropic.com or your gateway.
+        required: true
+        type: string
+      branch_prefix:
+        description: Prefix of the build branch; the branch is <prefix><app> or <prefix><app>-<track>.
+        required: false
+        default: lexi/build-
+        type: string
+      claude_code_version:
+        description: Exact version of @anthropic-ai/claude-code the builder, gates and reviewer run. Pinned so a new release cannot change what runs with your credentials.
+        required: false
+        type: string
+        default: 2.1.319
+      playwright_mcp_version:
+        description: Exact version of @playwright/mcp (and so of the Playwright and Chromium it pins).
+        required: false
+        type: string
+        default: 0.0.84
+      lexi_repository:
+        description: Repository holding the app-build scripts and prompts.
+        required: false
+        type: string
+        default: deriv-com/lexi
+      lexi_ref:
+        description: Ref of lexi_repository to take the scripts from. Pin it to the same ref as this workflow.
+        required: false
+        type: string
+        default: main
+    outputs:
+      continue:
+        description: '"true" when the caller should dispatch the next session (always "false" for the caller to act on when `chain` is "true": this workflow already did).'
+        value: ${{ jobs.build.outputs.continue_for_caller }}
+    secrets:
+      app_id:
+        description: ID of the GitHub App the workflow pushes and comments as.
+        required: true
+      app_private_key:
+        description: Private key of that GitHub App.
+        required: true
+      model_token:
+        description: Auth token for `model_base_url` (passed to Claude Code as ANTHROPIC_AUTH_TOKEN).
+        required: true
+      staging_test_email:
+        description: A staging test account the builder may sign in with. Optional; never pushed.
+        required: false
+      staging_test_password:
+        required: false
+      staging_real_email:
+        description: >-
+          A second staging account with real-looking data. Optional; never pushed.
+          Use a staging account only, never a production or personal one: the
+          builder can read it during every build-phase segment.
+        required: false
+      staging_real_password:
+        required: false
+      mailisk_api_key:
+        description: >-
+          Mailisk API key, so the builder can create disposable staging accounts and read their sign-up codes.
+          Optional; the namespace can be looked up with the key when MAILISK_NAMESPACE is not given.
+        required: false
+      mailisk_namespace:
+        description: The Mailisk namespace (addresses are <name>@<namespace>.mailisk.net). Optional.
+        required: false
+      slack_webhook_url:
+        description: Slack incoming webhook the gates post their verdicts to, from a step the builder never shares. Optional.
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  LEXI_APP: ${{ inputs.app }}
+  LEXI_APP_DIR: app/${{ inputs.app }}
+  LEXI_APP_LABEL: ${{ inputs.app_label != '' && inputs.app_label || (inputs.app == 'mobile' && 'the mobile app' || 'the web app') }}
+  LEXI_TRACK: ${{ inputs.track }}
+  # app, or app-track: names the branch, the reports and the artifacts.
+  LEXI_BUILD_ID: ${{ inputs.track != '' && format('{0}-{1}', inputs.app, inputs.track) || inputs.app }}
+  LEXI_BRANCH: ${{ inputs.branch_prefix }}${{ inputs.track != '' && format('{0}-{1}', inputs.app, inputs.track) || inputs.app }}
+  # The phase, plan and progress documents this loop owns.
+  LEXI_DOCS_DIR: app/${{ inputs.app }}/docs/build${{ inputs.track != '' && format('/tracks/{0}', inputs.track) || '' }}
+  LEXI_FLEET_SIZE: ${{ inputs.fleet_size }}
+  LEXI_GATE_MODE: ${{ inputs.gate_mode }}
+  LEXI_TESTS: ${{ inputs.tests }}
+  LEXI_BROWSER_CHECK: ${{ inputs.browser_check }}
+  LEXI_ASSESS_BROWSER: ${{ inputs.assess_browser }}
+  LEXI_STOP_AT_PHASE: ${{ inputs.stop_at_phase }}
+  LEXI_FLEET_LIGHT_MODEL: ${{ inputs.fleet_light_model }}
+  LEXI_BASE: ${{ inputs.base_branch }}
+  LEXI_SESSION: ${{ inputs.session }}
+  LEXI_MAX_SESSIONS: ${{ inputs.max_sessions }}
+  LEXI_SEGMENTS: ${{ inputs.segments }}
+  LEXI_SEGMENT_MINUTES: ${{ inputs.segment_minutes }}
+  LEXI_MODEL: ${{ inputs.model }}
+  LEXI_EFFORT: ${{ inputs.effort }}
+  LEXI_PHASES: ${{ inputs.phases }}
+  LEXI_PLAN_MODEL: ${{ inputs.plan_model != '' && inputs.plan_model || inputs.model }}
+  LEXI_PLAN_EFFORT: ${{ inputs.plan_effort != '' && inputs.plan_effort || inputs.effort }}
+  LEXI_PLAN_SEGMENT_MINUTES: ${{ inputs.plan_segment_minutes }}
+  LEXI_REVIEW_MODEL: ${{ inputs.review_model != '' && inputs.review_model || inputs.model }}
+  LEXI_REVIEW_EFFORT: ${{ inputs.review_effort != '' && inputs.review_effort || inputs.effort }}
+  LEXI_MAX_GATE_ATTEMPTS: ${{ inputs.max_gate_attempts }}
+  LEXI_RESUME_SEGMENTS: ${{ inputs.resume_segments }}
+  LEXI_SUBMODULES: ${{ inputs.submodules }}
+  LEXI_TRACK_SOURCES: ${{ inputs.track_sources }}
+  LEXI_PROTOTYPE_DIR: ${{ inputs.prototype_dir }}
+  LEXI_INTAKE_LABEL: ${{ inputs.intake_label }}
+
+jobs:
+  build:
+    # Repository switch: the calling repository sets the variable
+    # LEXI_APP_BUILD_ENABLED to "true" to let the loop run at all.
+    if: ${{ vars.LEXI_APP_BUILD_ENABLED == 'true' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 355
+    # The build segments hand GITHUB_TOKEN to the session as GH_TOKEN so `gh`
+    # can read the build PR's comments (for example a QA bot's reports). Read-only; the caller
+    # must grant issues:read and pull-requests:read too, or the token has none.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    # One builder per app (or per track) at a time. On the job, not the workflow, so the next
+    # session can start while this run's assess job is still checking.
+    concurrency:
+      group: app-build-${{ github.repository }}-${{ inputs.app }}${{ inputs.track != '' && format('-{0}', inputs.track) || '' }}
+      cancel-in-progress: false
+    # An absolute path: a `bash` the builder put earlier on PATH never runs a step.
+    defaults:
+      run:
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+    env:
+      # `secrets` is not available in a step's `if:`; a job env var is.
+      HAS_SLACK: ${{ secrets.slack_webhook_url != '' }}
+    outputs:
+      continue: ${{ steps.decide.outputs.continue }}
+      continue_for_caller: ${{ inputs.chain != 'true' && steps.decide.outputs.continue || 'false' }}
+      pr: ${{ steps.decide.outputs.pr }}
+      start_sha: ${{ steps.decide.outputs.start_sha }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      pushed: ${{ steps.final-push.outcome == 'success' && 'true' || 'false' }}
+      assess: ${{ steps.decide.outputs.assess }}
+      idle: ${{ steps.decide.outputs.idle }}
+    steps:
+      - name: Validate inputs
+        env:
+          APP: ${{ inputs.app }}
+          RESTART: ${{ inputs.restart_phase }}
+          ASSESS_EVERY: ${{ inputs.assess_every }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url }}
+        run: |
+          set -euo pipefail
+          case "$APP" in
+            web|mobile) ;;
+            *) echo "::error::app must be web or mobile (got '$APP')"; exit 1 ;;
+          esac
+          case "$LEXI_SEGMENTS" in
+            1|2|3) ;;
+            *) echo "::error::segments must be 1, 2 or 3"; exit 1 ;;
+          esac
+          if [ -n "$LEXI_TRACK" ] && ! printf '%s' "$LEXI_TRACK" | grep -qE '^[a-z0-9][a-z0-9-]{0,30}$'; then
+            echo "::error::track must be lowercase letters, digits and dashes (got '$LEXI_TRACK')"; exit 1
+          fi
+          case "$LEXI_FLEET_SIZE" in
+            0|2|3|4|5|6|7|8) ;;
+            *) echo "::error::fleet_size must be 0 or 2-8 (got '$LEXI_FLEET_SIZE')"; exit 1 ;;
+          esac
+          case "$LEXI_GATE_MODE" in
+            blocking|advisory) ;;
+            *) echo "::error::gate_mode must be blocking or advisory"; exit 1 ;;
+          esac
+          case "$LEXI_TESTS" in
+            e2e|unit) ;;
+            *) echo "::error::tests must be e2e or unit"; exit 1 ;;
+          esac
+          case "$RESTART" in
+            ""|intent|spec|plan|build) ;;
+            *) echo "::error::restart_phase must be empty, intent, spec, plan or build"; exit 1 ;;
+          esac
+          case "$LEXI_STOP_AT_PHASE" in
+            ""|spec|plan|build) ;;
+            *) echo "::error::stop_at_phase must be empty, spec, plan or build"; exit 1 ;;
+          esac
+          case "$ASSESS_EVERY" in
+            [1-9]) ;;
+            *) echo "::error::assess_every must be 1-9"; exit 1 ;;
+          esac
+          if [ -z "$MODEL_BASE_URL" ]; then
+            echo "::error::input model_base_url is empty; the builder needs a model endpoint."
+            exit 1
+          fi
+          # Planning segment + its gate must fit three times in the job.
+          if [ "$LEXI_PHASES" = "true" ] && [ $(( (LEXI_PLAN_SEGMENT_MINUTES + 25) * LEXI_SEGMENTS )) -gt 330 ]; then
+            echo "::error::plan_segment_minutes is too long: ${LEXI_SEGMENTS} × (${LEXI_PLAN_SEGMENT_MINUTES} + 25 for the gate) does not fit the 355-minute job."
+            exit 1
+          fi
+
+      - name: Check out the base branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Load the builder tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.lexi_repository }}
+          ref: ${{ inputs.lexi_ref }}
+          path: .lexi-app-build
+          persist-credentials: false
+      # Sealed before any builder runs: the builder can edit any file this user
+      # can write, so every step after a segment checks this digest and unpacks
+      # a fresh copy rather than run what is on disk.
+      - name: Seal the builder tools
+        id: tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/app-build"
+          cp -R .lexi-app-build/app-build/. "$RUNNER_TEMP/app-build/"
+          cp .lexi-app-build/agent-fix/scripts/agent-sandbox.sh .lexi-app-build/agent-fix/scripts/gh-token-mint.sh "$RUNNER_TEMP/app-build/"
+          rm -rf "$RUNNER_TEMP/app-build/tests"
+          chmod +x "$RUNNER_TEMP/app-build/"*.sh
+          rm -rf .lexi-app-build
+          /usr/bin/tar -czf "$RUNNER_TEMP/app-build.tgz" -C "$RUNNER_TEMP/app-build" .
+          echo "sha=$(/usr/bin/sha256sum "$RUNNER_TEMP/app-build.tgz" | /usr/bin/cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint App token
+        id: app
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORIES: ${{ github.event.repository.name }},${{ inputs.source_repositories }}
+          # Read only: the branch, the sources, the intake issues and the PR's
+          # feedback are fetched with it; nothing is pushed.
+          PERMISSIONS_JSON: '{"contents":"read","issues":"read","pull_requests":"read"}'
+          # The failing-check excerpts (feedback.sh) read check runs and job
+          # logs where the App may; without these they are left out.
+          OPTIONAL_PERMISSIONS_JSON: '{"checks":"read","actions":"read"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Switch to the build branch
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          FOUND=""
+          for DELAY in 0 3 6 12; do
+            sleep "$DELAY"
+            if git fetch -q "$REMOTE" "+refs/heads/${LEXI_BRANCH}:refs/remotes/origin/${LEXI_BRANCH}" 2>/dev/null; then FOUND=1; break; fi
+            if git ls-remote --exit-code "$REMOTE" HEAD > /dev/null 2>&1; then break; fi
+          done
+          if [ -n "$FOUND" ]; then
+            git checkout -q -B "$LEXI_BRANCH" "origin/${LEXI_BRANCH}"
+            echo "Continuing ${LEXI_BRANCH} at $(git rev-parse --short HEAD)."
+          else
+            git checkout -q -B "$LEXI_BRANCH"
+            echo "::notice::${LEXI_BRANCH} does not exist yet; starting it from ${LEXI_BASE}."
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/start-sha"
+          git config user.name "Lexi"
+          git config user.email "lexi-builder@users.noreply.github.com"
+
+      - name: Bring in the base branch
+        if: ${{ inputs.sync_base == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: '"$RUNNER_TEMP/app-build/sync-base.sh"'
+
+      - name: Restart at a phase
+        if: ${{ inputs.restart_phase != '' }}
+        env:
+          RESTART: ${{ inputs.restart_phase }}
+        run: |
+          set -euo pipefail
+          DOCS="$LEXI_DOCS_DIR"
+          mkdir -p "$DOCS"
+          printf '%s\n' "$RESTART" > "$DOCS/PHASE"
+          rm -f "$DOCS/GATE_FINDINGS.md"
+          if [ -f "$DOCS/PROGRESS.md" ] && head -n 1 "$DOCS/PROGRESS.md" | grep -qi '^status: *done'; then
+            sed -i '1s/.*/Status: building/' "$DOCS/PROGRESS.md"
+          fi
+          # gate.sh counts a phase's failures only after its last RESTART row;
+          # the restarted phase and every planning phase after it start afresh.
+          if [ -s "$DOCS/GATES.md" ]; then
+            case "$RESTART" in
+              intent) AGAIN="intent spec plan" ;;
+              spec) AGAIN="spec plan" ;;
+              plan) AGAIN="plan" ;;
+              *) AGAIN="" ;;
+            esac
+            for P in $AGAIN; do
+              echo "| ${P} | RESTART | - | ${LEXI_SESSION} | $(date -u '+%Y-%m-%d %H:%M UTC') | Restarted at ${RESTART} by the workflow input restart_phase. |" >> "$DOCS/GATES.md"
+            done
+          fi
+          git add -A -- "$DOCS"
+          git diff --cached --quiet || git commit -q -m "build(${LEXI_BUILD_ID}): restart at the ${RESTART} phase"
+          echo "::notice::Restarted ${LEXI_BUILD_ID} at the ${RESTART} phase."
+
+      - name: Fetch the sources
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: '"$RUNNER_TEMP/app-build/sources.sh"'
+
+      - name: Resolve the reference repositories
+        id: refs
+        env:
+          REFS: ${{ inputs.reference_repositories }}
+        run: |
+          set -euo pipefail
+          LIST="$(printf '%s' "$REFS" | tr ',' ' ' | xargs)"
+          if [ -z "$LIST" ]; then echo "owner=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          OWNERS="$(for R in $LIST; do printf '%s\n' "${R%%/*}"; done | sort -u)"
+          if [ "$(printf '%s\n' "$OWNERS" | wc -l | tr -d ' ')" -ne 1 ]; then
+            echo "::error::reference_repositories must all have one owner (got: $(echo $OWNERS))"
+            exit 1
+          fi
+          echo "owner=${OWNERS}" >> "$GITHUB_OUTPUT"
+          echo "names=$(for R in $LIST; do printf '%s,' "${R##*/}"; done | sed 's/,$//')" >> "$GITHUB_OUTPUT"
+
+      - name: Mint a read-only token for the reference repositories
+        id: refapp
+        if: ${{ steps.refs.outputs.owner != '' }}
+        continue-on-error: true
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ steps.refs.outputs.owner }}
+          REPOSITORIES: ${{ steps.refs.outputs.names }}
+          PERMISSIONS_JSON: '{"contents":"read"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Fetch the reference repositories (read-only)
+        if: ${{ steps.refs.outputs.owner != '' }}
+        env:
+          GH_TOKEN: ${{ steps.refapp.outputs.token }}
+          LEXI_REFERENCE_REPOSITORIES: ${{ inputs.reference_repositories }}
+        run: '"$RUNNER_TEMP/app-build/reference.sh"'
+
+      - name: Fetch the feature-intake issues (read-only)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          LEXI_FEEDBACK_AUTHORS: ${{ inputs.feedback_authors }}
+        run: '"$RUNNER_TEMP/app-build/intake.sh"'
+
+      - name: Read feedback from the PR
+        id: ctx
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          LEXI_FEEDBACK_AUTHORS: ${{ inputs.feedback_authors }}
+          LEXI_FEEDBACK_REPLAY_INPUT: ${{ inputs.replay_from_comment }}
+          LEXI_FEEDBACK_REPLAY_VAR: ${{ vars.LEXI_FEEDBACK_REPLAY_FROM }}
+          LEXI_FEEDBACK_BATCH_BYTES: ${{ vars.LEXI_FEEDBACK_BATCH_BYTES }}
+          LEXI_FEEDBACK_BATCH_TOKENS: ${{ vars.LEXI_FEEDBACK_BATCH_TOKENS }}
+          # feedback.sh redacts these from the CI log excerpts it passes on.
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+        run: |
+          set -uo pipefail
+          "$RUNNER_TEMP/app-build/feedback.sh"
+          STOP=""
+          if [ -s "$RUNNER_TEMP/stop-reason" ]; then STOP="$(cat "$RUNNER_TEMP/stop-reason")"; fi
+          PROGRESS="${LEXI_DOCS_DIR}/PROGRESS.md"
+          PHASE="$(tr -d '[:space:]' < "${LEXI_DOCS_DIR}/PHASE" 2>/dev/null || true)"
+          if [ -z "$STOP" ] && { [ "$LEXI_PHASES" != "true" ] || [ "$PHASE" = "build" ]; } \
+             && [ -f "$PROGRESS" ] && head -n 1 "$PROGRESS" | grep -qi '^status: *done'; then
+            STOP="PROGRESS.md says the app is done"
+          fi
+          if [ -n "$STOP" ]; then
+            echo "::notice::Not building: ${STOP}."
+            printf '%s' "$STOP" > "$RUNNER_TEMP/stop-reason"
+            echo "stop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stop=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The phase segment 1 runs in; each segment sets it for the next.
+          # Staging credentials reach build-phase segments only.
+          if [ "$LEXI_PHASES" != "true" ]; then PHASE=build; fi
+          case "$PHASE" in intent|spec|plan|build) ;; *) PHASE=intent ;; esac
+          echo "LEXI_SEGMENT_PHASE=${PHASE}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: ${{ steps.ctx.outputs.stop != 'true' }}
+        with:
+          node-version: 22
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: ${{ steps.ctx.outputs.stop != 'true' && inputs.app == 'mobile' }}
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Install the builder, the browser and the scoring tools
+        if: ${{ steps.ctx.outputs.stop != 'true' }}
+        env:
+          LEXI_INSTALL_BROWSER: ${{ inputs.browser_check }}
+          LEXI_CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          LEXI_PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
+        run: '"$RUNNER_TEMP/app-build/install-tools.sh"'
+
+      # The prototype is not started here: each segment serves it and stops it
+      # (segment.sh), because the builder can edit its code.
+
+      # Each segment ends by stopping everything the builder started and
+      # dropping what it wrote to the step's file commands (segment.sh). If it
+      # could not, its step fails (seen through continue-on-error as outcome
+      # "failure"), and no later step in this job mints a token or posts to
+      # Slack: those are the only steps holding the App private key or the
+      # webhook.
+      # ---- segment 1 ------------------------------------------------------
+      - name: Build — segment 1
+        id: seg1
+        if: ${{ steps.ctx.outputs.stop != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 200
+        env:
+          # Read-only (the job grants contents, issues and pull-requests: read),
+          # so the session can read the build PR's comments with `gh`.
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_BASE_URL: ${{ inputs.model_base_url }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          # Staging and Mailisk secrets only in build-phase segments: the
+          # planning phases never sign in.
+          STAGING_TEST_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_email || '' }}
+          STAGING_TEST_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_password || '' }}
+          STAGING_REAL_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_email || '' }}
+          STAGING_REAL_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_password || '' }}
+          MAILISK_API_KEY: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_api_key || '' }}
+          MAILISK_NAMESPACE: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_namespace || '' }}
+          # No Slack webhook: the gate only queues its verdict, and a later step
+          # posts it.
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # exec: the runner's cancel and timeout signals reach segment.sh itself.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/segment.sh" 1
+
+      - name: Post gate verdicts to Slack (after segment 1)
+        if: ${{ !cancelled() && env.HAS_SLACK == 'true' && steps.seg1.outcome != 'failure' }}
+        continue-on-error: true
+        env:
+          LEXI_SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/slack-post.sh"
+
+      - name: Mint a fresh token (after segment 1)
+        id: app1
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 2 && steps.seg1.outcome != 'failure' }}
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          # Push the branch and open its draft PR, then read the feedback again.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"read"}'
+          OPTIONAL_PERMISSIONS_JSON: '{"checks":"read","actions":"read"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Push and refresh feedback (after segment 1)
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 2 && steps.seg1.outcome != 'failure' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app1.outputs.token }}
+          LEXI_FEEDBACK_AUTHORS: ${{ inputs.feedback_authors }}
+          LEXI_FEEDBACK_BATCH_BYTES: ${{ vars.LEXI_FEEDBACK_BATCH_BYTES }}
+          LEXI_FEEDBACK_BATCH_TOKENS: ${{ vars.LEXI_FEEDBACK_BATCH_TOKENS }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # The refresh runs even when the push fails; the step still fails then.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          /bin/bash "$RUNNER_TEMP/app-build/push.sh" "after segment 1" || PUSH_RC=$?
+          /bin/bash "$RUNNER_TEMP/app-build/feedback.sh" || true
+          exit "${PUSH_RC:-0}"
+
+      # ---- segment 2 ------------------------------------------------------
+      - name: Build — segment 2
+        id: seg2
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 2 }}
+        continue-on-error: true
+        timeout-minutes: 200
+        env:
+          # Read-only (the job grants contents, issues and pull-requests: read),
+          # so the session can read the build PR's comments with `gh`.
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_BASE_URL: ${{ inputs.model_base_url }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          # Staging and Mailisk secrets only in build-phase segments: the
+          # planning phases never sign in.
+          STAGING_TEST_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_email || '' }}
+          STAGING_TEST_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_password || '' }}
+          STAGING_REAL_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_email || '' }}
+          STAGING_REAL_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_password || '' }}
+          MAILISK_API_KEY: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_api_key || '' }}
+          MAILISK_NAMESPACE: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_namespace || '' }}
+          # No Slack webhook: the gate only queues its verdict, and a later step
+          # posts it.
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # exec: the runner's cancel and timeout signals reach segment.sh itself.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/segment.sh" 2
+
+      - name: Post gate verdicts to Slack (after segment 2)
+        if: ${{ !cancelled() && env.HAS_SLACK == 'true' && steps.seg1.outcome != 'failure' && steps.seg2.outcome != 'failure' }}
+        continue-on-error: true
+        env:
+          LEXI_SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/slack-post.sh"
+
+      - name: Mint a fresh token (after segment 2)
+        id: app2
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 3 && steps.seg1.outcome != 'failure' && steps.seg2.outcome != 'failure' }}
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          # Push the branch and open its draft PR, then read the feedback again.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"read"}'
+          OPTIONAL_PERMISSIONS_JSON: '{"checks":"read","actions":"read"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Push and refresh feedback (after segment 2)
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 3 && steps.seg1.outcome != 'failure' && steps.seg2.outcome != 'failure' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app2.outputs.token }}
+          LEXI_FEEDBACK_AUTHORS: ${{ inputs.feedback_authors }}
+          LEXI_FEEDBACK_BATCH_BYTES: ${{ vars.LEXI_FEEDBACK_BATCH_BYTES }}
+          LEXI_FEEDBACK_BATCH_TOKENS: ${{ vars.LEXI_FEEDBACK_BATCH_TOKENS }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # The refresh runs even when the push fails; the step still fails then.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          /bin/bash "$RUNNER_TEMP/app-build/push.sh" "after segment 2" || PUSH_RC=$?
+          /bin/bash "$RUNNER_TEMP/app-build/feedback.sh" || true
+          exit "${PUSH_RC:-0}"
+
+      # ---- segment 3 ------------------------------------------------------
+      - name: Build — segment 3
+        id: seg3
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && fromJSON(inputs.segments) >= 3 }}
+        continue-on-error: true
+        timeout-minutes: 200
+        env:
+          # Read-only (the job grants contents, issues and pull-requests: read),
+          # so the session can read the build PR's comments with `gh`.
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_BASE_URL: ${{ inputs.model_base_url }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          # Staging and Mailisk secrets only in build-phase segments: the
+          # planning phases never sign in.
+          STAGING_TEST_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_email || '' }}
+          STAGING_TEST_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_test_password || '' }}
+          STAGING_REAL_EMAIL: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_email || '' }}
+          STAGING_REAL_PASSWORD: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.staging_real_password || '' }}
+          MAILISK_API_KEY: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_api_key || '' }}
+          MAILISK_NAMESPACE: ${{ env.LEXI_SEGMENT_PHASE == 'build' && secrets.mailisk_namespace || '' }}
+          # No Slack webhook: the gate only queues its verdict, and a later step
+          # posts it.
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # exec: the runner's cancel and timeout signals reach segment.sh itself.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/segment.sh" 3
+
+      - name: Post gate verdicts to Slack (after segment 3)
+        if: ${{ !cancelled() && env.HAS_SLACK == 'true' && steps.seg1.outcome != 'failure' && steps.seg2.outcome != 'failure' && steps.seg3.outcome != 'failure' }}
+        continue-on-error: true
+        env:
+          LEXI_SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/slack-post.sh"
+
+      # ---- end of session -------------------------------------------------
+      # Time budget (the job is cancelled at 355 min): ~10 setup + 3 × 85
+      # build segments, or 3 × (60 + 25 gate) planning segments, + the final
+      # push and report. The checks and the review run in the assess job.
+      - name: Mint a fresh token (end of session)
+        id: app3
+        if: ${{ !cancelled() && steps.seg1.outcome != 'failure' && steps.seg2.outcome != 'failure' && steps.seg3.outcome != 'failure' }}
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          # Push the branch, open its draft PR, push the report images to
+          # app-build-reports and comment the session report on the PR.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Push (end of session)
+        id: final-push
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && steps.app3.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ steps.app3.outputs.token }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "$RUNNER_TEMP/app-build/push.sh" "end of session"
+
+      # The decide and report steps run builder tools (cost.mjs, report.sh):
+      # take them from the sealed archive, not from a directory the builder
+      # could have edited.
+      - name: Restore the sealed builder tools
+        if: ${{ always() && steps.tools.outputs.sha != '' }}
+        env:
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+
+      - name: Decide whether the next session runs
+        id: decide
+        if: ${{ !cancelled() }}
+        env:
+          PUSH_OUTCOME: ${{ steps.final-push.outcome }}
+          ASSESS_EVERY: ${{ inputs.assess_every }}
+          SEGMENT_FAILED: ${{ steps.seg1.outcome == 'failure' || steps.seg2.outcome == 'failure' || steps.seg3.outcome == 'failure' }}
+        run: |
+          set -uo pipefail
+          REASON=""
+          START_SHA="$(cat "$RUNNER_TEMP/start-sha" 2>/dev/null || true)"
+          PHASE="$(tr -d '[:space:]' < "${LEXI_DOCS_DIR}/PHASE" 2>/dev/null || true)"
+          if [ "${SEGMENT_FAILED:-false}" = "true" ]; then
+            REASON="a segment could not stop everything the builder started, so no token was minted after it and nothing more was pushed; see the run log"
+          elif [ -s "$RUNNER_TEMP/stop-reason" ]; then
+            REASON="$(cat "$RUNNER_TEMP/stop-reason")"
+          elif [ "$PUSH_OUTCOME" != "success" ]; then
+            REASON="the final push failed, so the next session would not see this one"
+          elif [ -s "$RUNNER_TEMP/feedback-cursor-error" ]; then
+            REASON="the feedback cursor could not be saved (see the run log); the same feedback would be delivered again"
+          elif { [ "$LEXI_PHASES" != "true" ] || [ "$PHASE" = "build" ]; } \
+               && head -n 1 "${LEXI_DOCS_DIR}/PROGRESS.md" 2>/dev/null | grep -qi '^status: *done'; then
+            REASON="the builder marked PROGRESS.md done"
+          elif [ "$LEXI_SESSION" -ge "$LEXI_MAX_SESSIONS" ]; then
+            REASON="it reached max_sessions (${LEXI_MAX_SESSIONS})"
+          else
+            START_SHA="$(cat "$RUNNER_TEMP/start-sha" 2>/dev/null || true)"
+            COMMITS="$(git rev-list --count "${START_SHA}..HEAD" 2>/dev/null || echo 0)"
+            FAILED_SEGMENTS="$(grep -cv ':0$\|:124$\|:130$\|:skip$' "$RUNNER_TEMP/segment-exits" 2>/dev/null || echo 0)"
+            RAN_SEGMENTS="$(grep -cv ':skip$' "$RUNNER_TEMP/segment-exits" 2>/dev/null || echo 0)"
+            # A commit that only carries the feedback cursor (a saved replay
+            # request) does not keep a failing loop alive.
+            NON_CURSOR_CHANGES="$(git diff --name-only "${START_SHA}..HEAD" 2>/dev/null | grep -vxF "${LEXI_DOCS_DIR}/FEEDBACK_CURSOR.json" | grep -v '^$' || true)"
+            if { [ "${COMMITS:-0}" -eq 0 ] || [ -z "$NON_CURSOR_CHANGES" ]; } && [ "${RAN_SEGMENTS:-0}" -gt 0 ] && [ "$FAILED_SEGMENTS" -eq "$RAN_SEGMENTS" ]; then
+              REASON="every segment failed and nothing was committed; see the run log"
+            fi
+          fi
+          # Idle: a build-phase session in which every segment ended on its own
+          # and nothing outside the build documents changed. The builder is
+          # waiting for evidence, an assessment or a person, so starting the
+          # next session at once would only repeat it (sessions minutes apart,
+          # each only writing a note). The loop stops;
+          # the assess job starts the next session if its results give the
+          # builder something to fix. A session that delivered a feedback
+          # batch and still has feedback pending is not idle: the next
+          # session delivers the next batch.
+          IDLE=false
+          PENDING="$(cat "$RUNNER_TEMP/feedback-pending" 2>/dev/null || echo 0)"
+          [[ "$PENDING" =~ ^[0-9]+$ ]] || PENDING=0
+          if [ -z "$REASON" ] && [ "$PHASE" = "build" ] && [ "$(cat "$RUNNER_TEMP/segment-1.phase" 2>/dev/null)" = "build" ] \
+             && [ "${RAN_SEGMENTS:-0}" -gt 0 ] && ! grep -Eqv ':(0|skip)$' "$RUNNER_TEMP/segment-exits" 2>/dev/null \
+             && { [ "${PENDING:-0}" -eq 0 ] || [ ! -e "$RUNNER_TEMP/feedback-committed" ]; }; then
+            CHANGED="$(git diff --name-only "${START_SHA}..HEAD" 2>/dev/null | grep -v "^${LEXI_DOCS_DIR}/" | grep -v '^$' || true)"
+            if [ -z "$CHANGED" ]; then
+              IDLE=true
+              REASON="the session changed only its notes: the builder is waiting for evidence, an assessment or a person (it starts again when an assessment finds something to fix)"
+            fi
+          fi
+          echo "idle=${IDLE}" >> "$GITHUB_OUTPUT"
+          if [ -n "$REASON" ]; then
+            echo "::notice::The build loop stops: ${REASON}."
+            echo "continue=false" >> "$GITHUB_OUTPUT"
+            echo "LEXI_CONTINUE=false" >> "$GITHUB_ENV"
+            echo "LEXI_STOP_REASON=${REASON}" >> "$GITHUB_ENV"
+          else
+            echo "continue=true" >> "$GITHUB_OUTPUT"
+            echo "LEXI_CONTINUE=true" >> "$GITHUB_ENV"
+          fi
+          echo "pr=$(cat "$RUNNER_TEMP/pr-number" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          echo "start_sha=$(cat "$RUNNER_TEMP/start-sha" 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # The assess job runs every Nth session, and always on the last one.
+          if [ $(( LEXI_SESSION % ASSESS_EVERY )) -eq 0 ] || [ -n "$REASON" ]; then
+            echo "assess=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "assess=false" >> "$GITHUB_OUTPUT"
+          fi
+          COST="$(node "$RUNNER_TEMP/app-build/cost.mjs" "$RUNNER_TEMP"/segment-*.jsonl "$RUNNER_TEMP"/gate-*.json 2>/dev/null || true)"
+          if [ -n "$COST" ]; then
+            echo "Session cost (estimate): ${COST}"
+            echo "### Session ${LEXI_SESSION} cost (estimate): \$$(jq -r .total <<< "$COST")" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.parts | to_entries[] | "- \(.key): $\(.value.usd)"' <<< "$COST" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post the session report to the PR
+        if: ${{ !cancelled() && steps.ctx.outputs.stop != 'true' && steps.app3.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app3.outputs.token }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          PUSH_OUTCOME: ${{ steps.final-push.outcome }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "$RUNNER_TEMP/app-build/report.sh" session
+
+      # The transcripts are raw builder output, and ::add-mask:: hides a secret
+      # from the log, not from a file. Every file the next step uploads is
+      # redacted first, in place: by value for the secrets the builder held
+      # (this step is given no secret the builder did not already have, since a
+      # process a failed segment left running could read it), and by shape for
+      # the rest (App tokens, the App private key, the Slack webhook). If the
+      # redaction fails, nothing is uploaded.
+      - name: Redact the session logs
+        id: redact-logs
+        if: ${{ always() && steps.tools.outputs.sha != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          LEXI_REDACT_MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          shopt -s nullglob
+          node "$RUNNER_TEMP/app-build/redact-output.mjs" --files \
+            "$RUNNER_TEMP"/segment-*.jsonl "$RUNNER_TEMP"/segment-*.phase "$RUNNER_TEMP"/gate-*.json \
+            "$RUNNER_TEMP"/prompt-segment-*.md "$RUNNER_TEMP/prototype.log" \
+            "$RUNNER_TEMP/feedback-delivered.log" "$RUNNER_TEMP/feedback-cursor.json"
+
+      - name: Keep the session logs
+        if: ${{ always() && steps.redact-logs.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-build-${{ inputs.app }}${{ inputs.track != '' && format('-{0}', inputs.track) || '' }}-s${{ inputs.session }}
+          path: |
+            ${{ runner.temp }}/segment-*.jsonl
+            ${{ runner.temp }}/segment-*.phase
+            ${{ runner.temp }}/gate-*.json
+            ${{ runner.temp }}/prompt-segment-*.md
+            ${{ runner.temp }}/prototype.log
+            ${{ runner.temp }}/feedback-delivered.log
+            ${{ runner.temp }}/feedback-cursor.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  next:
+    needs: build
+    if: ${{ !cancelled() && inputs.chain == 'true' && needs.build.outputs.continue == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # A workflow_dispatch sent with GITHUB_TOKEN does start a run (GitHub's
+      # exception to the no-recursion rule). The caller must grant actions:write.
+      actions: write
+    steps:
+      - name: Start the next session
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP: ${{ inputs.app }}
+          SESSION: ${{ inputs.session }}
+          MAX_SESSIONS: ${{ inputs.max_sessions }}
+          CALLER: ${{ inputs.caller_workflow }}
+          TRACK: ${{ inputs.track }}
+          STOP_AT: ${{ inputs.stop_at_phase }}
+        run: |
+          set -euo pipefail
+          NEXT=$(( SESSION + 1 ))
+          # Only a track build passes `track`, and only a build that stops at a
+          # phase passes `stop_at_phase`: a caller without the input refuses an
+          # unknown one. restart_phase is never passed on.
+          TRACK_ARGS=()
+          if [ -n "$TRACK" ]; then TRACK_ARGS=(-f track="$TRACK"); fi
+          if [ -n "$STOP_AT" ]; then TRACK_ARGS+=(-f stop_at_phase="$STOP_AT"); fi
+          gh workflow run "$CALLER" --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f app="$APP" -f session="$NEXT" -f max_sessions="$MAX_SESSIONS" ${TRACK_ARGS[@]+"${TRACK_ARGS[@]}"}
+          echo "::notice::Dispatched session ${NEXT} of the ${APP}${TRACK:+ ${TRACK}} build."
+
+  assess:
+    needs: build
+    # Only when the session produced something to look at.
+    if: ${{ !cancelled() && needs.build.outputs.assess == 'true' && needs.build.outputs.pr != '' && needs.build.outputs.head_sha != needs.build.outputs.start_sha }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      # To start the next session when an idle loop's assessment finds work.
+      actions: write
+    defaults:
+      run:
+        # No ~/.bashrc or BASH_ENV: the builder's code could have written one.
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+    env:
+      LEXI_START_SHA: ${{ needs.build.outputs.start_sha }}
+      LEXI_TRACK_SOURCES: "false"
+      LEXI_REVIEW_MODEL: ${{ inputs.assess_model != '' && inputs.assess_model || (inputs.review_model != '' && inputs.review_model || inputs.model) }}
+    steps:
+      # The builder's commit is checked out with no token in reach, the tools
+      # are sealed, and only then is the App key used. The checks and the
+      # review run the builder's code and read its diff, so each ends by
+      # stopping everything it started (assess.sh); the report token is minted
+      # only when both did.
+      - name: Check out the session's last commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.build.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Load the builder tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.lexi_repository }}
+          ref: ${{ inputs.lexi_ref }}
+          path: .lexi-app-build
+          persist-credentials: false
+
+      - name: Seal the builder tools
+        id: tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/app-build"
+          cp -R .lexi-app-build/app-build/. "$RUNNER_TEMP/app-build/"
+          cp .lexi-app-build/agent-fix/scripts/agent-sandbox.sh .lexi-app-build/agent-fix/scripts/gh-token-mint.sh "$RUNNER_TEMP/app-build/"
+          rm -rf "$RUNNER_TEMP/app-build/tests"
+          chmod +x "$RUNNER_TEMP/app-build/"*.sh
+          rm -rf .lexi-app-build
+          /usr/bin/tar -czf "$RUNNER_TEMP/app-build.tgz" -C "$RUNNER_TEMP/app-build" .
+          echo "sha=$(/usr/bin/sha256sum "$RUNNER_TEMP/app-build.tgz" | /usr/bin/cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint App token
+        id: app
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORIES: ${{ github.event.repository.name }},${{ inputs.source_repositories }}
+          # Read only: the branch, the sources, the intake issues and the PR's
+          # feedback are fetched with it; nothing is pushed.
+          PERMISSIONS_JSON: '{"contents":"read","issues":"read","pull_requests":"read"}'
+          # The failing-check excerpts (feedback.sh) read check runs and job
+          # logs where the App may; without these they are left out.
+          OPTIONAL_PERMISSIONS_JSON: '{"checks":"read","actions":"read"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Fetch the sources and the previous assessment
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PR: ${{ needs.build.outputs.pr }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          set +e
+          printf '%s' "$PR" > "$RUNNER_TEMP/pr-number"
+          /bin/bash "$RUNNER_TEMP/app-build/sources.sh"
+          # Only for the previous assessment, which the review compares against.
+          LEXI_FEEDBACK_AUTHORS="" /bin/bash "$RUNNER_TEMP/app-build/feedback.sh" || true
+          printf '%s' "$PR" > "$RUNNER_TEMP/pr-number"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: ${{ inputs.app == 'mobile' }}
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: Install the reviewer, the browser and the scoring tools
+        env:
+          LEXI_CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
+          LEXI_PLAYWRIGHT_MCP_VERSION: ${{ inputs.playwright_mcp_version }}
+        run: '"$RUNNER_TEMP/app-build/install-tools.sh"'
+
+      - name: Light checks (report only)
+        id: checks
+        continue-on-error: true
+        timeout-minutes: 50
+        env:
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        # Serves the prototype, runs the checks, then stops everything both started.
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "$RUNNER_TEMP/app-build/assess.sh" checks
+
+      - name: Code review (a fresh session, read-only)
+        id: review
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          ANTHROPIC_BASE_URL: ${{ inputs.model_base_url }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "$RUNNER_TEMP/app-build/assess.sh" review
+
+      - name: Mint a fresh token (report)
+        id: app2
+        if: ${{ !cancelled() && steps.checks.outcome != 'failure' && steps.review.outcome != 'failure' }}
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          # Push the report images to app-build-reports and comment the
+          # assessment on the PR.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write"}'
+          OUTPUT_NAME: token
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Post the assessment to the PR
+        if: ${{ !cancelled() && steps.app2.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app2.outputs.token }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          exec /bin/bash "$RUNNER_TEMP/app-build/report.sh" assessment
+
+      - name: Start the next session if the assessment found work for an idle builder
+        # Not after a part that left processes running: this step holds an
+        # actions:write token.
+        if: ${{ !cancelled() && needs.build.outputs.idle == 'true' && inputs.chain == 'true' && steps.checks.outcome != 'failure' && steps.review.outcome != 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP: ${{ inputs.app }}
+          SESSION: ${{ inputs.session }}
+          MAX_SESSIONS: ${{ inputs.max_sessions }}
+          CALLER: ${{ inputs.caller_workflow }}
+          TRACK: ${{ inputs.track }}
+          STOP_AT: ${{ inputs.stop_at_phase }}
+        run: |
+          set -uo pipefail
+          FAILED="$(jq '[.[] | select(.status == "fail")] | length' "$RUNNER_TEMP/checks/checks.json" 2>/dev/null || echo 0)"
+          SERIOUS="$(grep -m1 -oiE '^Findings: *[0-9]+ blockers?, *[0-9]+ majors?' "$RUNNER_TEMP/checks/REVIEW.md" 2>/dev/null | grep -oE '[0-9]+' | awk '{n += $1} END {print n + 0}')"
+          echo "Assessment: ${FAILED} failed check(s), ${SERIOUS:-0} blocker/major finding(s)."
+          if [ "${FAILED:-0}" -eq 0 ] && [ "${SERIOUS:-0}" -eq 0 ]; then
+            echo "::notice::Nothing for the idle builder to fix; the loop stays stopped until a person steps in."
+            exit 0
+          fi
+          if [ "$SESSION" -ge "$MAX_SESSIONS" ]; then
+            echo "::notice::The assessment found work, but the loop is at max_sessions (${MAX_SESSIONS})."
+            exit 0
+          fi
+          NEXT=$(( SESSION + 1 ))
+          ARGS=(-f app="$APP" -f session="$NEXT" -f max_sessions="$MAX_SESSIONS")
+          if [ -n "$TRACK" ]; then ARGS+=(-f track="$TRACK"); fi
+          if [ -n "$STOP_AT" ]; then ARGS+=(-f stop_at_phase="$STOP_AT"); fi
+          gh workflow run "$CALLER" --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" "${ARGS[@]}"
+          echo "::notice::The assessment found work; dispatched session ${NEXT} of the ${APP}${TRACK:+ ${TRACK}} build."
+
+      # As in the build job: the review transcript and the check logs are
+      # redacted before upload, and nothing is uploaded if that fails.
+      - name: Redact the assessment logs
+        id: redact-logs
+        if: ${{ always() && steps.tools.outputs.sha != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.model_token }}
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          LEXI_REDACT_MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Fresh tools from the archive sealed before any builder code ran.
+          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
+          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
+          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
+          node "$RUNNER_TEMP/app-build/redact-output.mjs" --files "$RUNNER_TEMP/checks" "$RUNNER_TEMP/review.md.json"
+
+      - name: Keep the assessment logs
+        if: ${{ always() && steps.redact-logs.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-build-${{ inputs.app }}${{ inputs.track != '' && format('-{0}', inputs.track) || '' }}-s${{ inputs.session }}-assessment
+          path: |
+            ${{ runner.temp }}/checks/
+            ${{ runner.temp }}/review.md.json
+          if-no-files-found: ignore
+          retention-days: 14

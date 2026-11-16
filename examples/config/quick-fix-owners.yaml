@@ -1,0 +1,49 @@
+# Who reviews, announces and is tagged on agent-made fixes, for the fictional
+# "Acme" organisation. Values are Slack user IDs, so a request can tag a person
+# directly without a directory lookup.
+
+# Requested to merge an agent-fix pull request, per platform. Any extra key
+# (p2p_web, p2p_mobile, ...) overrides the default for that platform.
+mergeReviewers:
+  web: U0TEST01
+  mobile: U0TEST02
+  p2p_web: U0TEST03
+  p2p_mobile: U0TEST03
+
+# Where a shipped fix is announced, per platform, and who is tagged.
+announcements:
+  web:
+    channel: C0TEST01
+    mentionKind: subteam
+    mentionId: S0TEST01
+  p2p_web:
+    channel: C0TEST04
+    mentionKind: user
+    mentionId: U0TEST03
+  p2p_mobile:
+    channel: C0TEST04
+    mentionKind: user
+    mentionId: U0TEST03
+
+# Who is tagged under the agent's analysis reply, per channel.
+analysisReply:
+  channels:
+    C0TEST01:
+      mentionId: U0TEST03
+    C0TEST02:
+      mentionId: U0TEST04
+
+# Who owns a fix in each category, per platform.
+categories:
+  payments:
+    description: Deposits, withdrawals and payment methods
+    web: U0TEST03
+    mobile: U0TEST04
+  auth:
+    description: Sign-up, login and account recovery
+    web: U0TEST05
+    mobile: U0TEST06
+  notifications:
+    description: In-app and push notifications
+    web: U0TEST03
+    mobile: U0TEST04

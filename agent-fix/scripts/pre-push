@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Agent-only pre-push hook, installed by agent-fix.yml for the duration of the
+# job through core.hooksPath. It is not the repository's own hook: that one is
+# shared with human developers, who may push any branch and edit any file.
+#
+# Rule 1: the branch must start with the agent's prefix (default `lexi/`).
+# Rule 2: the push must not carry a change to a protected path
+#         (see protected-paths.sh).
+#
+# The repository's own hook is chained FIRST, so protections it already has
+# (for example no pushes to main) still apply. Both read the ref list on
+# stdin, so it is captured once and replayed.
+#
+# Configuration is read from guard.env beside this file, not from the
+# environment, so the agent cannot loosen the rules by exporting a variable.
+set -eu
+
+HOOK_DIR=$(cd "$(dirname "$0")" && pwd)
+LEXI_BRANCH_PREFIX="lexi/"
+LEXI_EXTRA_BRANCH_PREFIXES=""
+LEXI_PROTECTED_PATHS_FILE=""
+LEXI_REPO_HOOKS_DIR=".githooks"
+# shellcheck source=/dev/null
+[ -f "$HOOK_DIR/guard.env" ] && . "$HOOK_DIR/guard.env"
+export LEXI_PROTECTED_PATHS_FILE
+# shellcheck source=protected-paths.sh
+. "$HOOK_DIR/protected-paths.sh"
+
+REFS=$(cat)
+
+if [ -n "$LEXI_REPO_HOOKS_DIR" ] && [ -x "$LEXI_REPO_HOOKS_DIR/pre-push" ]; then
+  printf '%s\n' "$REFS" | "$LEXI_REPO_HOOKS_DIR/pre-push" "$@" || exit 1
+fi
+
+zero="0000000000000000000000000000000000000000"
+
+branch_allowed() {
+  local branch=$1 prefix
+  for prefix in $LEXI_BRANCH_PREFIX $LEXI_EXTRA_BRANCH_PREFIXES; do
+    case "$branch" in "$prefix"*) return 0 ;; esac
+  done
+  return 1
+}
+
+printf '%s\n' "$REFS" | while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ -n "${remote_ref:-}" ] || continue
+  remote_branch="${remote_ref#refs/heads/}"
+
+  # Deletions carry no tree to inspect.
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+
+  if ! branch_allowed "$remote_branch"; then
+    printf '\nBlocked: refusing to push "%s".\n' "$remote_branch" >&2
+    printf '  Branches created by the agent must start with "%s".\n' "$LEXI_BRANCH_PREFIX" >&2
+    printf '  Rename with: git branch -m %s<topic>\n\n' "$LEXI_BRANCH_PREFIX" >&2
+    exit 1
+  fi
+
+  if [ "$remote_sha" = "$zero" ]; then
+    changed=$(git diff-tree --no-commit-id --name-only -r "$local_sha" 2>/dev/null || true)
+  else
+    changed=$(git diff --name-only "$remote_sha..$local_sha" 2>/dev/null || true)
+  fi
+
+  # `while read`, not `for path in $changed`: word-splitting would mis-split a
+  # path containing whitespace, and a guard that silently skips a file it
+  # cannot parse is worse than one that never ran.
+  hits=$(printf '%s\n' "$changed" | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if pattern=$(lexi_protecting_pattern "$path"); then
+      printf '  - %s  (matches %s)\n' "$path" "$pattern"
+    fi
+  done)
+
+  if [ -n "$hits" ]; then
+    printf '\nBlocked: this push changes protected files.\n' >&2
+    # '%s' with hits as an ARGUMENT, never as the format string: a path
+    # containing % would otherwise be read as a conversion specifier.
+    printf '%s\n' "$hits" >&2
+    printf '  These paths are changed by a human, not by the agent.\n' >&2
+    printf '  Revert them and push again.\n\n' >&2
+    exit 1
+  fi
+done
+
+exit 0

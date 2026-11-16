@@ -1,0 +1,183 @@
+# Who may ask the agent to do what, for the fictional "Acme" organisation.
+#
+# Authorization fails closed: an identity that is not listed here, a role that
+# does not exist, or a permission no role grants means "denied". Permissions are
+# exact strings; there are no wildcards and no prefix matches.
+#
+# Roles inherit with `inherits`. A role's effective permissions are its own plus
+# everything every parent grants, so grant a permission once, at the lowest rung
+# that should hold it, and let the rungs above inherit it.
+
+version: 1
+
+defaults:
+  # What happens to someone who has no entry under `users`. `denied` (the
+  # default, and the recommended setting) refuses them everything, reads
+  # included. `viewer` gives them `authenticatedRole` instead, which suits a
+  # workspace where every member may read the configured repositories.
+  unknownUserRole: denied
+  # The role given to unlisted people when `unknownUserRole` is `viewer`.
+  # Ignored while `unknownUserRole` is `denied`.
+  authenticatedRole: viewer
+  # Who a refused person should ask. Unset, the agent names every platform_admin.
+  accessContact: "Grace (#acme-platform)"
+
+roles:
+  viewer:
+    description: Read-only. Required for every read tool (issues, pull requests, files, Actions runs).
+    permissions:
+      - issue.read
+      - actions.read
+      - memory.recall
+      # Teaching the agent a personal preference or a team convention, and
+      # correcting one. Attribution, not rank, is the control: memory is
+      # advisory and never authorizes an action.
+      - memory.remember
+      # Rebuild programmes: read a programme's status and the inputs its
+      # technical spec is drafted from. Reads only.
+      - programme.read
+
+  qa:
+    description: Files and verifies bugs, drafts specs, closes tickets it has triaged.
+    inherits: [viewer]
+    permissions:
+      - bug.submit
+      - investigation.manual.request
+      - issue.comment
+      # Adding and removing labels (from the deployment's label allowlist).
+      - issue.update
+      # A rung that may close must also be able to hold an issue open and to
+      # cancel a closure it scheduled; the undo travels with the action.
+      - issue.close
+      - issue.keep_open
+      - pending_closure.cancel
+      - qa.execute
+      - actions.cancel
+      - spec.create
+      - spec.revise
+      - spec.submit_review
+      - work_item.create
+      # A top-level message to the request's own channel or an allowlisted one.
+      - slack.post_channel
+
+  engineer:
+    description: Works issues, opens and merges pull requests, approves specs.
+    inherits: [viewer]
+    permissions:
+      - issue.process
+      - issue.comment
+      - issue.update
+      - issue.close
+      - issue.keep_open
+      - pending_closure.cancel
+      - evidence.add
+      - quick_fix.trigger
+      - code_task.trigger
+      - actions.cancel
+      - qa.execute
+      - pr.create
+      - pr.update_branch
+      - pr.merge
+      - pr.close
+      - branch.create
+      - branch.merge
+      # Rebasing an agent branch onto its base (never a shared branch).
+      - branch.rebase
+      # Stopping an app build (labels its PR); deletes nothing, undone by a resume.
+      - app_build.stop
+      # Passing a person's words to an app build's builder as a PR comment.
+      - app_build.feedback
+      - spec.create
+      - spec.revise
+      - spec.submit_review
+      - spec.approve
+      - work_item.create
+      - slack.post_channel
+      # Rebuild programmes: re-arm one failed or handed-back build task
+      # (within its attempt cap), and record a decision for later briefs.
+      - programme.task.retry
+      - programme.decision.record
+
+  qa_lead:
+    description: Everything QA and an engineer may do, plus batch processing.
+    inherits: [qa, engineer]
+    permissions:
+      - batch.execute
+
+  team_lead:
+    description: Coordinates a team's board, reassigns work, retires specs.
+    inherits: [engineer]
+    permissions:
+      - project.write
+      - issue.reassign
+      - spec.supersede
+      - batch.execute
+      # Removing team conventions: it applies to everyone and, with no filter,
+      # clears them all, so adding one (memory.remember) is not enough.
+      - memory.forget_team
+      # Starting or resuming an app build: hours of paid, unattended builder work.
+      - app_build.trigger
+      # Rebuild programmes: commission or extend one, plan and dispatch its
+      # milestones, pause, resume or cancel it, retire or re-scope its tasks,
+      # grant attempts beyond the policy cap, and click the human-only review
+      # approvals (a milestone, the hardening conclusion).
+      - programme.programme.create
+      - programme.programme.cancel
+      - programme.pause
+      - programme.task.dispatch
+      - programme.task.cancel
+      - programme.task.rescope
+      - programme.task.extend_attempts
+      - programme.milestone.approve
+      - programme.hardening.conclude
+
+  security_reviewer:
+    description: Reads security-labelled issues. Deliberately outside the main ladder.
+    inherits: [viewer]
+    permissions:
+      - security.read
+
+  platform_admin:
+    description: Runs the deployment. Grants access and rolls back runs.
+    inherits: [team_lead, qa_lead]
+    permissions:
+      - authorization.grant
+      - rollback.execute
+
+# Slack user ID -> roles. Scopes narrow a role to the teams or repositories
+# named; an unscoped grant applies everywhere. Team names are the `team:`
+# values in repos.yaml. A scoped grant covers only an action that names a
+# team (or, for repository scopes, a repository) inside the scope, plus
+# actions confined to the person themselves (their own memory, the thread they
+# asked in). Anything else is refused to them: an action on a repository
+# repos.yaml gives no team, org-wide memory, a post to another channel. Give
+# every repository in repos.yaml a team if you rely on team scopes.
+users:
+  U0TEST07:
+    name: Grace
+    roles: [platform_admin]
+  U0TEST01:
+    name: Alice
+    roles: [team_lead]
+    scopes:
+      teams: [home]
+  U0TEST02:
+    name: Bob
+    roles: [team_lead]
+    scopes:
+      teams: [p2p]
+  U0TEST03:
+    name: Carol
+    roles: [engineer]
+  U0TEST04:
+    name: Dave
+    roles: [engineer]
+  U0TEST05:
+    name: Erin
+    roles: [qa]
+  U0TEST06:
+    name: Frank
+    roles: [qa_lead]
+
+# `groups:` (Slack user groups mapped to roles) is accepted by the schema but
+# not evaluated yet, so list people individually under `users`.

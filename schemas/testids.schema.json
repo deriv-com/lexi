@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/deriv-com/lexi/schemas/testids.schema.json",
+  "title": "LexiTestIdRegistry",
+  "description": ".lexi/testids.json in each rebuild repo — the machine-readable registry of every test id the app exposes, kept in sync with the code in the same PR. Downstream this parameterises the Maestro/e2e selector allowlist so validators never guess selectors.",
+  "type": "object",
+  "required": ["schemaVersion", "platform", "generatedAtSha", "screens", "prefixes", "safeLabels"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "platform": { "enum": ["web", "static", "flutter"] },
+    "appId": {
+      "type": "string",
+      "description": "Application id, mobile platforms only (e.g. com.example.app)."
+    },
+    "generatedAtSha": {
+      "type": "string",
+      "description": "Commit SHA the registry was last regenerated against. Empty string only in the pre-scaffold skeleton."
+    },
+    "screens": {
+      "type": "object",
+      "description": "Screen slug -> the test ids that screen exposes.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["ids"],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)+$"
+            }
+          }
+        }
+      }
+    },
+    "prefixes": {
+      "type": "array",
+      "description": "Allowed test-id prefixes (screen slugs), for validator allowlisting.",
+      "items": { "type": "string" }
+    },
+    "safeLabels": {
+      "type": "array",
+      "description": "Human-visible labels that are safe for selector fallback (never product copy invented by an agent).",
+      "items": { "type": "string" }
+    }
+  }
+}

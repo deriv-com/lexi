@@ -1,0 +1,40 @@
+# Copy into your repository as .github/workflows/rebase-branch.yml.
+#
+# Rebases one agent branch onto its base and force-pushes with lease, or
+# reports CONFLICT without pushing. Lexi starts it when an agent PR falls
+# behind; you can also run it by hand from the Actions tab.
+
+name: rebase-branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Agent branch to rebase (must start with lexi/).
+        required: true
+        type: string
+      onto:
+        description: Base branch. Empty means the default branch.
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: rebase-${{ inputs.branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rebase:
+    uses: deriv-com/lexi/.github/workflows/rebase-branch.yml@main
+    with:
+      branch: ${{ inputs.branch }}
+      onto: ${{ inputs.onto }}
+    secrets:
+      # Optional: push as the App so the rebased PR gets CI. Use the workflow
+      # App (separate from the App Lexi's server uses, no Actions write or
+      # Workflows permission, installed only on the repositories it works on).
+      app_id: ${{ secrets.LEXI_APP_ID }}
+      app_private_key: ${{ secrets.LEXI_APP_PRIVATE_KEY }}

@@ -1,0 +1,40 @@
+name: App build workflow tests
+
+on:
+  pull_request:
+    paths:
+      - app-build/**
+      - .github/workflows/app-build.yml
+      - .github/workflows/app-build-tests.yml
+      - agent-fix/scripts/agent-sandbox.sh
+      - agent-fix/scripts/gh-token-mint.sh
+  push:
+    branches: [main]
+    paths:
+      - app-build/**
+      - .github/workflows/app-build.yml
+      - .github/workflows/app-build-tests.yml
+      - agent-fix/scripts/agent-sandbox.sh
+      - agent-fix/scripts/gh-token-mint.sh
+
+permissions:
+  contents: read
+
+# Runs a pull request's own scripts on a GitHub-hosted runner (passwordless
+# sudo). Nothing privileged is in the job: a read-only token, no secrets, and
+# a checkout that keeps no credential.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Check shell syntax
+        run: |
+          for script in app-build/*.sh agent-fix/scripts/agent-sandbox.sh agent-fix/scripts/gh-token-mint.sh; do bash -n "$script"; done
+      - name: Test shell checks and base sync
+        run: python3 -m unittest discover -s app-build/tests -v

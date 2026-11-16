@@ -1,0 +1,44 @@
+# Copy into your rebuild repository as .github/workflows/programme-verify-web.yml.
+#
+# A thin caller for post-merge verification of a web rebuild: runs this
+# repository's Playwright e2e suite (`npm run test:e2e`) and an axe scan
+# against a preview deployment, and POSTs the results to the orchestrator as
+# checks evidence.
+#
+# Pin `uses:` to a release tag or commit SHA rather than @main once one exists,
+# and set `lexi_ref` to the same ref so the composite actions match the workflow.
+
+name: programme-verify-web
+
+on:
+  workflow_dispatch:
+    inputs:
+      attempt_id:
+        description: Attempt id, echoed on the evidence bundle.
+        required: true
+        type: string
+      preview_url:
+        description: Fully-qualified preview deployment URL to verify.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: deriv-com/lexi/.github/workflows/programme-verify-web.yml@main
+    with:
+      attempt_id: ${{ inputs.attempt_id }}
+      preview_url: ${{ inputs.preview_url }}
+      enabled: ${{ vars.PROGRAMME_BUILD_ENABLED == 'true' }}
+      orchestrator_url: ${{ vars.LEXI_ORCHESTRATOR_URL }}
+      # node_version: "22"
+      # Exact @axe-core/cli version (pinned by default).
+      # axe_core_version: "4.14.0"
+      lexi_ref: main
+    secrets:
+      evidence_token: ${{ secrets.LEXI_EVIDENCE_TOKEN }}
+      # Only when the orchestrator sits behind an identity-aware proxy.
+      # access_client_id: ${{ secrets.LEXI_ACCESS_CLIENT_ID }}
+      # access_client_secret: ${{ secrets.LEXI_ACCESS_CLIENT_SECRET }}

@@ -1,0 +1,50 @@
+# Slack app manifest for a Socket Mode Lexi.
+#
+# Create the app at https://api.slack.com/apps -> "Create New App" -> "From a
+# manifest", paste this file, then:
+#   1. Install the app to your workspace and copy the Bot User OAuth Token
+#      (xoxb-...) into SLACK_BOT_TOKEN.
+#   2. Copy the Signing Secret (Basic Information) into SLACK_SIGNING_SECRET.
+#   3. Under Basic Information -> App-Level Tokens, generate a token with the
+#      connections:write scope and copy it (xapp-...) into SLACK_APP_TOKEN.
+#   4. Set SLACK_AGENT_ENABLED=true and start the server.
+#
+# Socket Mode needs no public URL: the server opens the connection to Slack.
+
+display_information:
+  name: Lexi
+  description: An agent that answers in threads and acts in GitHub on your behalf, within the permissions you grant.
+  background_color: "#2c2d30"
+
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: lexi
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read # receive @mentions
+      - chat:write # reply in threads
+      - channels:history # read the thread a mention is in (public channels)
+      - groups:history # the same in private channels the app is invited to
+      - im:history # direct messages
+      - im:read
+      - im:write
+      - reactions:write # acknowledge a message while a turn runs
+      - users:read # resolve who is asking
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

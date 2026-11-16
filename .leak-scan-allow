@@ -1,0 +1,10 @@
+# Allowed leak-scan findings. Format: <path glob> | <literal text on the line>  # reason
+# Keep this short: remove a value rather than allowlisting it wherever you can.
+
+** | github.com/deriv-com/lexi  # the repository's own URL
+.github/workflows/*.yml | default: deriv-com/lexi  # reusable workflows fetch their own scripts from this repository
+NOTICE | Deriv Group  # copyright holder, required by the Apache-2.0 NOTICE
+.leak-scan-allow | Deriv Group  # the NOTICE allowlist entry above
+.leak-scan-allow | default: deriv-com/lexi  # the workflow allowlist entry above
+examples/workflows/*.yml | uses: deriv-com/lexi/.github/workflows/  # example callers reference the reusable workflows
+.leak-scan-allow | uses: deriv-com/lexi/.github/workflows/  # the example-caller allowlist entry above

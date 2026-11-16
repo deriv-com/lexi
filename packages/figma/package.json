@@ -1,0 +1,16 @@
+{
+  "name": "@lexi/figma",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Figma adapter: a client for the public Figma-hosted MCP server, design-link parsing, read and write gateways, and a visual quality-bar review of prototype screenshots",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

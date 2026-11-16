@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A pull request's own code runs here (npm ci runs install scripts, then the
+# build and the tests) on a GitHub-hosted runner, where it has passwordless
+# sudo. That is acceptable only because nothing privileged shares a job with
+# it: the token is read-only, the checkout keeps no credential, fork PRs get no
+# secrets, and the one secret (the private leak-scan patterns) is used in a job
+# of its own that installs and runs none of the PR's code.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # gitleaks scans the full history, not just the tip
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Licence check (runtime dependencies)
+        run: npm run licenses
+
+      - name: Secret scan (gitleaks, full history)
+        run: >
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2
+          detect --source /repo --redact --verbose
+
+  leak-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+
+      # The organisation-specific patterns live in a repository secret so the list itself is
+      # never published. --require-private fails the job if the secret is missing, rather than
+      # passing with only the generic rules. No dependencies are installed and nothing from the
+      # PR is executed in this job: on a pull request the scanner itself is the base branch's
+      # copy (the PR's files are only scanned), so a PR cannot change the code that holds the
+      # secret. It sits beside the checkout so it scans the PR's working tree.
+      - name: Leak scan
+        env:
+          LEAK_SCAN_PATTERNS: ${{ secrets.LEAK_SCAN_PATTERNS }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+          # Branch names, PR text and commit metadata are published along with the code,
+          # so they get the same rules. Passed through env, never interpolated into the script.
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          # Fork PRs never receive secrets. They get the built-in rules only; the
+          # private patterns run on every same-repository PR and on main after merge.
+          FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          SCANNER=scripts/leak-scan.mjs
+          if [ -n "${BASE_SHA:-}" ]; then
+            SCANNER=scripts/.leak-scan-base.mjs
+            git show "${BASE_SHA}:scripts/leak-scan.mjs" > "$SCANNER"
+            echo "/scripts/.leak-scan-base.mjs" >> .git/info/exclude
+          fi
+          # The commits this run introduces: the PR's own commits, or the pushed range on main.
+          # A first push (no "before") scans the whole history.
+          if [ -n "${BASE_SHA:-}" ]; then
+            export LEAK_SCAN_COMMIT_RANGE="${BASE_SHA}..${HEAD_SHA}"
+          elif [ -n "${PUSH_BEFORE:-}" ] && [ "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+            export LEAK_SCAN_COMMIT_RANGE="${PUSH_BEFORE}..${PUSH_AFTER}"
+          fi
+          if [ "${FROM_FORK}" = "true" ] && [ -z "${LEAK_SCAN_PATTERNS:-}" ]; then
+            echo "::notice::Fork pull request: scanning with the built-in rules only. The private patterns run after merge."
+            node "$SCANNER"
+            node "$SCANNER" --metadata
+          else
+            node "$SCANNER" --require-private
+            node "$SCANNER" --require-private --metadata
+          fi

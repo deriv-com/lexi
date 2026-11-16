@@ -1,0 +1,33 @@
+# Agent-fix eligibility for the fictional "Acme" organisation.
+#
+# Decides which issues an agent may open a fix pull request for, and how large
+# that pull request may be. These are eligibility rules, not edit bans: the
+# protected-path guard applies separately, and a human reviews every pull
+# request before it merges.
+
+# Only issues at or below this priority and severity are eligible.
+maxPriority: P3
+maxSeverity: S3
+
+# Size of a fix pull request.
+maxFilesChanged: 3
+maxLinesChanged: 80
+
+# Issues with these labels, in these components, or touching these paths are
+# never eligible.
+forbiddenLabels: [security, "lexi:hold"]
+forbiddenComponents: [payments, auth]
+forbiddenPathPatterns:
+  - "**/auth/**"
+  - "**/payments/**"
+  - "**/migrations/**"
+
+# Load on reviewers.
+maxOpenPrsPerReviewer: 3
+maxOpenPrsPerIssue: 1
+
+# Stale fix pull requests: remind, then close.
+staleReminderDays: 7
+staleCloseDays: 14
+
+autofixLabel: "lexi:autofix"

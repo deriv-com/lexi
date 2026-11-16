@@ -1,0 +1,84 @@
+# Rebuild-programme policy for the fictional "Acme" organisation.
+#
+# A programme rebuilds an existing app in an agent-owned repository as a
+# sequence of milestones, each broken into build tasks that are dispatched to
+# the reusable `programme-build.yml` workflow. Validated by
+# `@lexi/programme`'s `parseProgrammePolicy`; every key below is optional and
+# falls back to the schema default.
+#
+# Two switches must BOTH be on for programmes to act: `enabled` here and the
+# `PROGRAMME_ENABLED` environment variable. Auto-merge has its own pair:
+# `autoMerge.enabled` here and `PROGRAMME_AUTO_MERGE_ENABLED`.
+
+version: 1
+
+# Off by default. A new capability never turns itself on by omission.
+enabled: false
+
+programmes:
+  # The only repository keys a programme may target. Each must be registered
+  # in repos.yaml with `autonomyTier: autonomous`.
+  allowedRepoKeys: [acme_web_rebuild]
+  repoSettings:
+    acme_web_rebuild:
+      # Each programme gets its own working branch, named
+      # `<prefix><programme-key>-<YYYYMMDD>`. A human merges the finished
+      # programme's branch into the default branch.
+      workingBranchPrefix: rebuild/
+      requireTechnicalSpec: true
+      featureSpecDir: docs/feature-spec
+      trackingIssue: true
+
+dispatch:
+  workflowFile: programme-build.yml
+  exploreWorkflowFile: programme-explore.yml
+  maxConcurrentTasksPerProgramme: 3
+  maxTaskAttempts: 3
+  maxInfraFaults: 3
+  maxConflictRearms: 20
+  staleDispatchMinutes: 420
+  # Attempt 1 runs on the first rung; each retry climbs; the last rung repeats.
+  # Use the model names your gateway serves.
+  modelLadder: [model-small, model-large]
+  modelByTaskKind:
+    technical-spec: model-large
+  checkCommands:
+    types: npm run typecheck
+    lint: npm run lint
+    unit: npm test
+    build: npm run build
+
+autoMerge:
+  # Independent of `enabled`: dispatch can run with humans merging first.
+  enabled: false
+  requiredEvidencePhases: [red, green, checks]
+  requiredChecks: [types, lint, unit, build]
+  requireAcMatrixGreen: true
+  requireHeadShaMatch: true
+
+milestoneReview:
+  # `gate`: every milestone parks the programme until a human approves it.
+  # `notify`: the card is posted but the programme keeps building.
+  mode: gate
+  requireExploratorySweep: true
+
+hardening:
+  labelPrefix: hardening_
+  requireZeroOpenFindings: true
+
+apiContract:
+  repoSlug: acme/api-contracts
+  path: openapi/core.json
+  ref: main
+  excludeTagPatterns: [admin, internal, archived]
+  baseUrl: https://api.staging.example.com/v1
+  authBaseUrl: https://auth.staging.example.com
+  # Money in motion stays behind fixtures; never called live from a build.
+  fixtureOnlyPatterns: [withdraw, transfer]
+
+designSources:
+  allowedFileKeys: []
+
+referenceRepos: {}
+
+uiSources: {}

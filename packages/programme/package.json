@@ -1,0 +1,26 @@
+{
+  "name": "@lexi/programme",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Rebuild-programme domain: programme, milestone and build-task state machines, the task graph, the auto-merge and hardening gates, and the policy loader",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "graph:programme": "node scripts/generate-programme-graph.mjs"
+  },
+  "dependencies": {
+    "@lexi/agent": "*",
+    "@lexi/contracts": "*",
+    "@lexi/github": "*",
+    "@lexi/governance": "*",
+    "js-yaml": "^4.3.2",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@lexi/workitems": "*",
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,91 @@
+# Repository registry for the fictional "Acme" organisation.
+#
+# Roles gate what the agent may do with a repo:
+#   issues -> bug intake, duplicate detection, corpus sync
+#   code   -> code search, file reads, agent-fix dispatch, pull requests
+#   specs  -> spec issues
+# A `placeholder: true` repo can be read but is never offered as a dispatch target.
+
+version: 1
+
+source:
+  # The issue tracker. Addressed by the key `issues`.
+  issues:
+    organization: acme
+    repository: issues
+    roles: [issues]
+
+products:
+  home_web:
+    organization: acme
+    repository: web-app
+    platform: web
+    team: home
+    roles: [code, specs, issues]
+    project:
+      organization: acme
+      projectNumber: 1
+      shippedStatus: "In Review"
+
+  home_mobile:
+    organization: acme
+    repository: mobile-app
+    platform: mobile
+    team: home
+    roles: [code, specs, issues]
+    project:
+      organization: acme
+      projectNumber: 2
+      shippedStatus: "In progress"
+
+  p2p_web:
+    organization: acme
+    repository: p2p-web
+    platform: p2p_web
+    team: p2p
+    roles: [code, specs, issues]
+
+  p2p_mobile:
+    organization: acme
+    repository: p2p-mobile
+    platform: p2p_mobile
+    team: p2p
+    # A repo whose default branch is not `main` must say so, or dispatch 404s.
+    defaultBranch: master
+    roles: [code, specs, issues]
+
+  shared_packages:
+    organization: acme
+    repository: mobile-packages
+    platform: packages
+    team: packages
+    roles: [code]
+
+  design_system:
+    organization: acme
+    repository: design-system
+    platform: design_system
+    team: design
+    roles: [code]
+
+  web_next:
+    organization: acme
+    repository: web-app-next
+    platform: web_next
+    team: home
+    roles: [code, specs]
+    # Readable, but never offered to agent-fix or issue creation.
+    placeholder: true
+
+  # An agent-owned rebuild repository. `autonomyTier: autonomous` is the only
+  # tier in which the programme's deterministic merge executor may merge a PR
+  # after its auto-merge gate passes; every other repo is `standard` (the
+  # default), where merging stays with humans. Placeholder until it exists.
+  acme_web_rebuild:
+    organization: acme
+    repository: web-rebuild
+    platform: web_rebuild
+    team: home
+    roles: [code]
+    autonomyTier: autonomous
+    placeholder: true

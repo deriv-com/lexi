@@ -1,0 +1,44 @@
+{
+  "name": "@lexi/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Lexi server: a NestJS composition root with the Slack conversation surface and a small HTTP API",
+  "license": "Apache-2.0",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@lexi/agent": "*",
+    "@lexi/agent-tools": "*",
+    "@lexi/ai": "*",
+    "@lexi/app-build": "*",
+    "@lexi/config": "*",
+    "@lexi/contracts": "*",
+    "@lexi/database": "*",
+    "@lexi/github": "*",
+    "@lexi/governance": "*",
+    "@lexi/logger": "*",
+    "@lexi/memory": "*",
+    "@lexi/metrics": "*",
+    "@lexi/ownership": "*",
+    "@lexi/privacy": "*",
+    "@lexi/programme": "*",
+    "@lexi/slack": "*",
+    "@lexi/workflows": "*",
+    "@lexi/workitems": "*",
+    "@nestjs/common": "^11.1.28",
+    "@nestjs/core": "^11.1.28",
+    "@nestjs/platform-express": "^11.1.28",
+    "@slack/bolt": "^3.22.0",
+    "js-yaml": "^4.3.2",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.5.4"
+  }
+}

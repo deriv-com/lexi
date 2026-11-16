@@ -1,0 +1,20 @@
+# gitleaks configuration. CI runs gitleaks over the full history.
+#
+# The default rules stay on. The allowlist below names test-fixture shapes that
+# the generic-api-key rule mistakes for secrets. Each entry matches one fixture
+# shape exactly; do not widen an entry to a whole file or directory.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures that look like keys"
+regexTarget = "line"
+regexes = [
+  # Model-bench arm ids: <task-key>:bench-<yymmddhhmm>-<model>
+  '''"[a-z]+:m\d+:[a-z0-9-]+:bench-\d{10}-[a-z0-9.-]+"''',
+  # Fictional Figma file key used by the prototype-store specs
+  '''LexiOwnedKey\d+''',
+  # Fake installation token the app-build spec uses to prove errors are redacted
+  '''token=ghs_abcdef123 refused''',
+]

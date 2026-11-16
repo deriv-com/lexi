@@ -1,0 +1,20 @@
+# Duplicate detection policy for the fictional "Acme" organisation.
+#
+# Candidates come from lexical search and, when enabled, a semantic index. The
+# thresholds below decide what is closed as a duplicate automatically, what is
+# sent to a human, and what is left alone.
+
+duplicate:
+  version: "1.0.0"
+  # At or above: a duplicate the pipeline may act on (subject to run budgets).
+  highConfidenceThreshold: 0.85
+  # Between medium and high: a person decides, prompted by `reviewDedupLabel`.
+  mediumConfidenceThreshold: 0.6
+  reviewDedupLabel: "lexi:review-dedup"
+  # Lexical candidates below this similarity are discarded before ranking.
+  lexicalMinSimilarity: 0.35
+  # How many semantic neighbours to fetch per report.
+  semanticTopK: 10
+  # Keep the legacy rank-fusion score authoritative until the calibrated 0-1
+  # similarity has been reviewed against real decisions in shadow mode.
+  calibratedSimilarityEnabled: false

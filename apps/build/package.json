@@ -1,0 +1,18 @@
+{
+  "name": "@lexi/build",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Lexi·Build — the Table UI and the local bridge that runs a crew of agent personas through intent → spec → plan → wireframe → prototype → build ⇄ review → ship.",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge/server.mjs",
+    "check": "node --check bridge/server.mjs && node --check bridge/pipeline.mjs && node --check bridge/config.mjs && node --check bridge/workspace.mjs && node --check bridge/guards.mjs && node --check ui/app.js && for f in bridge/runners/*.mjs; do node --check \"$f\" || exit 1; done"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  }
+}

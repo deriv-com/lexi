@@ -1,0 +1,21 @@
+{
+  "name": "@lexi/github",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Octokit-backed GitHub adapter with guarded mutation gateways",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/logger": "*",
+    "@nestjs/common": "^11.1.28",
+    "@octokit/auth-app": "^6.1.4",
+    "@octokit/rest": "^20.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,77 @@
+# Local development: Postgres with pgvector, and the Lexi server built from
+# this checkout.
+#
+#   cp .env.example .env        # at the repository root, then fill in the
+#                               # Slack tokens and your model gateway
+#   docker compose -f examples/docker-compose.yml up
+#
+# The server answers on http://localhost:3000/health. Slack stays disconnected
+# until SLACK_AGENT_ENABLED=true and SLACK_APP_TOKEN are set in .env.
+#
+# The first start installs dependencies, generates the Prisma client, creates
+# the schema with `prisma db push` and builds, so it takes a few minutes. This
+# is a development setup, not a production deployment: build an image for that.
+
+name: lexi
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: lexi
+      POSTGRES_DB: lexi
+      # Local development only: no password, and reachable from this machine
+      # alone. Never use trust authentication anywhere shared.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexi -d lexi"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  server:
+    image: node:20-bookworm
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      # Overrides for the container network and the example policy files.
+      DATABASE_URL: postgresql://lexi@postgres:5432/lexi
+      GOVERNANCE_CONFIG_DIR: examples/config
+      PORT: "3000"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        npm ci
+        npm run prisma:generate
+        echo 'CREATE EXTENSION IF NOT EXISTS vector;' \
+          | npx prisma db execute --stdin --schema packages/database/prisma/schema.prisma
+        npx prisma db push --skip-generate --schema packages/database/prisma/schema.prisma
+        npm run build
+        exec npm start -w @lexi/server
+    ports:
+      - "3000:3000"
+    volumes:
+      - ..:/app
+      # Keep the container's dependencies out of the host checkout: native
+      # binaries (Prisma engines, SWC) differ between the two.
+      - node-modules:/app/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+
+volumes:
+  postgres-data:
+  node-modules:

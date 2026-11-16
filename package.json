@@ -1,0 +1,46 @@
+{
+  "name": "lexi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A self-hosted AI teammate that works in Slack and GitHub: it answers questions, triages bugs, fixes them and builds apps, with every action checked against your access policy",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deriv-com/lexi.git"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "prisma:generate": "npm run generate -w @lexi/database",
+    "build": "tsc -b tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "leak-scan": "node scripts/leak-scan.mjs",
+    "licenses": "node scripts/check-licenses.mjs",
+    "docs:capability-matrix": "tsc -b apps/server && node scripts/generate-capability-matrix.mjs",
+    "check": "npm run prisma:generate && npm run build && npm run lint && npm test && npm run leak-scan && npm run licenses"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@swc/core": "^1.7.26",
+    "@types/node": "^20.14.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.0.0",
+    "unplugin-swc": "^1.5.1",
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.1"
+    },
+    "multer": "^2.5.0"
+  }
+}

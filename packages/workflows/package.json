@@ -1,0 +1,27 @@
+{
+  "name": "@lexi/workflows",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workflow engine: the issue state machine, the orchestrator that drives an issue from intake to closure, and the verification, escalation and closure policies it applies",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/ai": "*",
+    "@lexi/contracts": "*",
+    "@lexi/database": "*",
+    "@lexi/governance": "*",
+    "@lexi/github": "*",
+    "@lexi/logger": "*",
+    "@lexi/metrics": "*",
+    "@lexi/notifications": "*",
+    "@lexi/ownership": "*",
+    "@lexi/slack": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

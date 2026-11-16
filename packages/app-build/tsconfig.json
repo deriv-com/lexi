@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../agent" },
+    { "path": "../agent-tools" },
+    { "path": "../github" },
+    { "path": "../governance" }
+  ],
+  "include": ["src"]
+}

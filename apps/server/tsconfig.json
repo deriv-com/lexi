@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../../packages/agent" },
+    { "path": "../../packages/agent-tools" },
+    { "path": "../../packages/app-build" },
+    { "path": "../../packages/ai" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/database" },
+    { "path": "../../packages/github" },
+    { "path": "../../packages/governance" },
+    { "path": "../../packages/logger" },
+    { "path": "../../packages/memory" },
+    { "path": "../../packages/metrics" },
+    { "path": "../../packages/ownership" },
+    { "path": "../../packages/privacy" },
+    { "path": "../../packages/programme" },
+    { "path": "../../packages/slack" },
+    { "path": "../../packages/workflows" },
+    { "path": "../../packages/workitems" }
+  ],
+  "include": ["src"]
+}

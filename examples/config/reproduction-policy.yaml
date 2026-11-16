@@ -1,0 +1,23 @@
+# Reproduction and pending-closure policy for the fictional "Acme" organisation.
+#
+# When repeated reproduction attempts cannot observe a reported bug, the issue is
+# marked pending closure and closed only after a grace period nobody objected in.
+# Protected issues are never marked, whatever the evidence.
+
+pendingClosure:
+  enabled: true
+  # Days between the pending mark and the actual closure.
+  gracePeriodDays: 7
+  # Independent attempts that must fail to observe the bug before it is marked.
+  minQualifyingAttempts: 2
+  pendingLabel: "lexi:pending-closure"
+  notObservedLabel: "lexi:not-observed"
+  # Any of these labels cancels a pending closure.
+  holdLabels: ["lexi:hold", keep-open]
+  # Issues carrying these labels, severities or priorities are never marked.
+  protectedLabels: [security, keep-open, "lexi:hold"]
+  protectedSeverities: [s1, s2]
+  protectedPriorities: [p0, p1]
+  minConfidence: 0.85
+  # A human comment, label or assignment inside this window protects the issue.
+  humanActivityWindowDays: 14

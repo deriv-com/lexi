@@ -1,0 +1,22 @@
+{
+  "name": "@lexi/memory",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The agent's memory of personal preferences, team conventions and past conversations: working, episodic and semantic stores behind one budget-capped MemoryPort",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/contracts": "*",
+    "@lexi/database": "*",
+    "js-yaml": "^4.3.2",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.5.4"
+  }
+}

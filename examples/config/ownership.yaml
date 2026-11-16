@@ -1,0 +1,60 @@
+# Ownership table for the fictional "Acme" organisation: module x platform -> person in charge.
+#
+# An issue is routed to a module by its labels, keywords and file paths, then to
+# that module's person in charge (PIC) on the issue's platform. Anything that
+# matches no module goes to `defaultModule`. Every PIC must also appear in
+# people-overrides.yaml, or the agent has no Slack ID to tag.
+
+platforms:
+  web:
+    team: Web
+    channel: "#acme-web"
+    channelId: C0TEST01
+    teamLead: alice
+  mobile:
+    team: Mobile
+    channel: "#acme-mobile"
+    channelId: C0TEST02
+    teamLead: bob
+
+defaultModule: default
+defaultPlatform: web
+
+modules:
+  payments:
+    description: Deposits, withdrawals and payment methods
+    web: { pic: carol }
+    mobile: { pic: dave }
+    keywords: [payment, deposit, withdrawal, cashier]
+    paths: [/payments, /cashier]
+
+  auth:
+    description: Sign-up, login and account recovery
+    web: { pic: erin }
+    mobile: { pic: frank }
+    keywords: [login, sign up, signup, password reset, 2fa]
+    paths: [/auth, /login]
+
+  notifications:
+    description: In-app and push notifications
+    web: { pic: carol }
+    mobile: { pic: dave }
+    keywords: [notification, push, inbox]
+    paths: [/notifications]
+
+  default:
+    description: Everything no other module claims
+    web: { pic: alice }
+    mobile: { pic: bob }
+
+moduleLabelMappings:
+  "area:payments": payments
+  "area:auth": auth
+  "area:notifications": notifications
+
+# Legacy label -> platform mapping, for callers that still ask for a "component".
+labelMappings:
+  "domain:web": web
+  "domain:mobile": mobile
+
+priorityLabels: ["priority:P0", "priority:P1", "priority:P2", "priority:P3"]

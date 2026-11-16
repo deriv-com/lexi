@@ -1,0 +1,21 @@
+{
+  "name": "@lexi/slack",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Slack Bolt adapter for notifications and Socket Mode conversations",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/logger": "*",
+    "@nestjs/common": "^11.1.28",
+    "@slack/bolt": "^3.22.0",
+    "@slack/web-api": "^7.3.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

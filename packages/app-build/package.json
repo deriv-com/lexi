@@ -1,0 +1,23 @@
+{
+  "name": "@lexi/app-build",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The app-build loop's agent surface: report parsers, a service that starts, stops, steers and reads builds, a chat relay watcher and the agent tools",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@lexi/agent": "*",
+    "@lexi/agent-tools": "*",
+    "@lexi/github": "*"
+  },
+  "devDependencies": {
+    "@lexi/governance": "*",
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.3.2",
+    "typescript": "^5.5.4"
+  }
+}

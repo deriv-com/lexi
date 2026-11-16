@@ -1,0 +1,21 @@
+{
+  "name": "@lexi/ownership",
+  "version": "0.0.0",
+  "private": true,
+  "description": "YAML-driven ownership resolver (module x platform)",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.28",
+    "js-yaml": "^4.3.2",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.5.4"
+  }
+}
