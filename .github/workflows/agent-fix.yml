@@ -13,6 +13,11 @@
 # run log between the AGENT_FIX_RESULT markers, or from the `agent-fix-<run>`
 # artifact, and relays it.
 #
+# Nothing this job writes is shared with another job: its files are in a
+# directory created for it under RUNNER_TEMP, its git credential helper is in a
+# git config file in that directory, and a caller that fans this workflow out
+# within one run sets `artifact_suffix`.
+#
 # What bounds the agent, which runs headlessly with permissions skipped:
 #   - a GitHub App token scoped to this repository (plus `extra_repositories`)
 #     and to contents/pull-requests/issues write, checks/actions read. The App
@@ -176,6 +181,18 @@ on:
         required: false
         type: number
         default: 12
+      artifact_suffix:
+        description: >-
+          Appended to the name of every artifact this workflow uploads. Leave it
+          empty unless one run calls this workflow more than once (a matrix, or
+          two jobs): the names are otherwise the same for each call, the second
+          upload fails, and its result is lost. Give each call its own value,
+          for example the matrix value with a leading dash. A dispatcher that reads the result
+          artifact by its documented name does not find a suffixed one; it
+          reads the result from the job log instead.
+        required: false
+        type: string
+        default: ""
       lexi_repository:
         description: Repository holding these scripts and skills.
         required: false
@@ -223,22 +240,32 @@ jobs:
           BUDGET_MINUTES: ${{ inputs.budget_minutes }}
         run: |
           set -euo pipefail
+          # Every file this job keeps (the tokens, the request, the result)
+          # lives in a directory of its own: a fresh name per job, readable by
+          # this user only. A fixed path under /tmp is shared by every job on a
+          # self-hosted runner host, so two jobs running at once would read
+          # each other's token and overwrite each other's result. Later steps
+          # get the path from the job environment; the steps that run the
+          # agent or the repository's code discard whatever those wrote to
+          # GITHUB_ENV (agent-sandbox.sh), so it cannot be pointed elsewhere.
+          umask 077
+          LEXI_JOB_DIR=$(/usr/bin/mktemp -d "${RUNNER_TEMP}/lexi-agent-fix.XXXXXXXX")
+          echo "LEXI_JOB_DIR=${LEXI_JOB_DIR}" >> "$GITHUB_ENV"
           # The final ten minutes are reserved for publishing the result.
-          echo "$(( $(date +%s) + (BUDGET_MINUTES - 10) * 60 ))" > /tmp/agent-fix-deadline-epoch
+          echo "$(( $(date +%s) + (BUDGET_MINUTES - 10) * 60 ))" > "$LEXI_JOB_DIR/agent-fix-deadline-epoch"
           # Written before anything runs, so it cannot know why a run stopped.
           # A step that stops the run on purpose replaces it with its reason.
-          cat > /tmp/handback.txt <<EOF
+          cat > "$LEXI_JOB_DIR/handback.txt" <<EOF
           Agent-fix stopped before the agent produced a result, so no code was changed. The failed step on the run says what stopped it.
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
           # Lets the finalize step tell whether anything replaced this seed.
-          cp /tmp/handback.txt /tmp/handback.seed
-          # Self-hosted runners: nothing from an earlier job may be resumed,
-          # appended to or revoked as if it were this job's.
-          rm -f /tmp/gh-token /tmp/agent-fix-session /tmp/agent-fix-segment.jsonl /tmp/run.jsonl
-          printf '%s' "$RAW_PAYLOAD" > /tmp/raw.json
+          cp "$LEXI_JOB_DIR/handback.txt" "$LEXI_JOB_DIR/handback.seed"
+          # The directory is new, so nothing from an earlier job can be
+          # resumed, appended to or revoked as if it were this job's.
+          printf '%s' "$RAW_PAYLOAD" > "$LEXI_JOB_DIR/raw.json"
           # Keys only: never print the brief to the log.
-          jq -r 'keys[]' /tmp/raw.json
+          jq -r 'keys[]' "$LEXI_JOB_DIR/raw.json"
 
       - name: Resolve settings
         id: settings
@@ -251,7 +278,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() {
-            printf '%s\nRun: %s/%s/actions/runs/%s\n' "$1" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+            printf '%s\nRun: %s/%s/actions/runs/%s\n' "$1" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
             echo "::error::$1"
             exit 1
           }
@@ -320,16 +347,16 @@ jobs:
         run: |
           set -euo pipefail
           echo .lexi-agent >> .git/info/exclude
-          if ! bash .lexi-agent/agent-fix/scripts/normalize-payload.sh /tmp/raw.json > /tmp/ctx.json 2> /tmp/normalize-error.txt; then
+          if ! bash .lexi-agent/agent-fix/scripts/normalize-payload.sh "$LEXI_JOB_DIR/raw.json" > "$LEXI_JOB_DIR/ctx.json" 2> "$LEXI_JOB_DIR/normalize-error.txt"; then
             {
               echo "Agent-fix rejected the request."
-              cat /tmp/normalize-error.txt
+              cat "$LEXI_JOB_DIR/normalize-error.txt"
               echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            } > /tmp/handback.txt
-            cat /tmp/normalize-error.txt
+            } > "$LEXI_JOB_DIR/handback.txt"
+            cat "$LEXI_JOB_DIR/normalize-error.txt"
             exit 1
           fi
-          jq -r 'keys[]' /tmp/ctx.json
+          jq -r 'keys[]' "$LEXI_JOB_DIR/ctx.json"
 
       # Installation tokens last an hour and nothing refreshes them in the
       # background: a daemon holding the App private key for the whole job would
@@ -344,7 +371,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
           OUTPUT_NAME: token
         run: |
@@ -363,27 +390,49 @@ jobs:
           SCRIPTS="${GITHUB_WORKSPACE}/.lexi-agent/agent-fix/scripts"
           # One App and one token for every repository, so a single fallback
           # entry is enough and credential.useHttpPath is not needed.
-          echo "*=/tmp/gh-token" > /tmp/gh-credential-map
+          umask 077
+          echo "*=${LEXI_JOB_DIR}/gh-token" > "$LEXI_JOB_DIR/gh-credential-map"
+          echo "GH_CREDENTIAL_MAP=${LEXI_JOB_DIR}/gh-credential-map" >> "$GITHUB_ENV"
           git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
-          git config --global credential.https://github.com.username x-access-token
-          git config --global credential.https://github.com.helper "$SCRIPTS/gh-credential-helper.sh"
+          # The helper has to reach submodules and anything the agent clones,
+          # which repository-local config does not. The user's ~/.gitconfig
+          # would, but on a self-hosted runner every job of this user shares
+          # it: one job's helper would answer another job's git. So this job
+          # gets a global config file of its own (GIT_CONFIG_GLOBAL, git 2.32
+          # or newer) that includes the user's, and nothing this job or the
+          # agent sets with `git config --global` outlives or leaves the job.
+          JOB_GITCONFIG="${LEXI_JOB_DIR}/gitconfig"
+          : > "$JOB_GITCONFIG"
+          for inherited in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            if [ -f "$inherited" ]; then git config --file "$JOB_GITCONFIG" --add include.path "$inherited"; fi
+          done
+          git config --file "$JOB_GITCONFIG" credential.https://github.com.username x-access-token
+          git config --file "$JOB_GITCONFIG" credential.https://github.com.helper "$SCRIPTS/gh-credential-helper.sh"
+          export GIT_CONFIG_GLOBAL="$JOB_GITCONFIG"
+          if [ "$(git config --global --get credential.https://github.com.helper 2>/dev/null || true)" != "$SCRIPTS/gh-credential-helper.sh" ]; then
+            printf 'Agent-fix stopped before the agent started: git on this runner is older than 2.32 and cannot keep the credentials of this job apart from those of other jobs (GIT_CONFIG_GLOBAL), so no code was changed.\nRun: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
+            echo "::error::git 2.32 or newer is required (GIT_CONFIG_GLOBAL)."
+            exit 1
+          fi
+          echo "GIT_CONFIG_GLOBAL=${JOB_GITCONFIG}" >> "$GITHUB_ENV"
 
           # gh takes its credential from GH_TOKEN per process and caches
           # nothing, so a shim that re-reads the file per invocation keeps every
           # gh call authenticated for the whole run.
           REAL_GH=$(command -v gh)
-          mkdir -p /tmp/gh-shim
-          cat > /tmp/gh-shim/gh <<SHIM
+          mkdir -p "$LEXI_JOB_DIR/gh-shim"
+          cat > "$LEXI_JOB_DIR/gh-shim/gh" <<SHIM
           #!/usr/bin/env bash
-          if [ -s /tmp/gh-token ]; then
-            GH_TOKEN=\$(cat /tmp/gh-token)
+          if [ -s "${LEXI_JOB_DIR}/gh-token" ]; then
+            GH_TOKEN=\$(cat "${LEXI_JOB_DIR}/gh-token")
             export GH_TOKEN
             export GITHUB_TOKEN="\$GH_TOKEN"
           fi
           exec "$REAL_GH" "\$@"
           SHIM
-          chmod +x /tmp/gh-shim/gh
-          echo /tmp/gh-shim >> "$GITHUB_PATH"
+          chmod +x "$LEXI_JOB_DIR/gh-shim/gh"
+          echo "$LEXI_JOB_DIR/gh-shim" >> "$GITHUB_PATH"
           # The agent segments below run while this is "true"; each segment sets
           # it again, after it has stopped everything the agent started.
           echo "AGENT_CONTINUE=true" >> "$GITHUB_ENV"
@@ -397,21 +446,21 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          REF=$(jq -r '.thread_ref // empty' /tmp/ctx.json)
-          RESUME=$(jq -r '.resume_issue_number // empty' /tmp/ctx.json)
+          REF=$(jq -r '.thread_ref // empty' "$LEXI_JOB_DIR/ctx.json")
+          RESUME=$(jq -r '.resume_issue_number // empty' "$LEXI_JOB_DIR/ctx.json")
           if [ -z "$REF" ]; then
             echo "No thread_ref supplied; skipping the thread duplicate guard."
           else
-            gh pr list --search "$REF" --state open --limit 100 --json number,body > /tmp/pr-candidates.json
-            gh issue list --search "$REF" --state all --limit 100 --json number,body > /tmp/issue-candidates.json
+            gh pr list --search "$REF" --state open --limit 100 --json number,body > "$LEXI_JOB_DIR/pr-candidates.json"
+            gh issue list --search "$REF" --state all --limit 100 --json number,body > "$LEXI_JOB_DIR/issue-candidates.json"
             # A jq program, not a shell expansion.
             # shellcheck disable=SC2016
             ANCHOR_FILTER='.[] | select(((.body // "") | split("\n") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "") | gsub("^_+|_+$"; "")) | index($anchor)) != null) | .number'
-            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" /tmp/pr-candidates.json > /tmp/pr_hits.txt
-            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" /tmp/issue-candidates.json > /tmp/issue_hits.txt
+            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" "$LEXI_JOB_DIR/pr-candidates.json" > "$LEXI_JOB_DIR/pr_hits.txt"
+            jq -r --arg anchor "lexi-thread: $REF" "$ANCHOR_FILTER" "$LEXI_JOB_DIR/issue-candidates.json" > "$LEXI_JOB_DIR/issue_hits.txt"
 
             set +e
-            GUARD_OUT=$(bash .lexi-agent/agent-fix/scripts/duplicate-guard.sh /tmp/pr_hits.txt /tmp/issue_hits.txt "$RESUME")
+            GUARD_OUT=$(bash .lexi-agent/agent-fix/scripts/duplicate-guard.sh "$LEXI_JOB_DIR/pr_hits.txt" "$LEXI_JOB_DIR/issue_hits.txt" "$RESUME")
             GUARD_RC=$?
             set -e
             if [ "$GUARD_RC" -ne 0 ]; then
@@ -419,17 +468,17 @@ jobs:
                 echo "This thread was already picked up; no second fix run was started."
                 echo "$GUARD_OUT"
                 echo "Thread: $REF"
-              } > /tmp/handback.txt
-              cat /tmp/handback.txt
+              } > "$LEXI_JOB_DIR/handback.txt"
+              cat "$LEXI_JOB_DIR/handback.txt"
               exit 1
             fi
             case "$GUARD_OUT" in
               CONTINUE:*)
                 PR_NUM=$(printf '%s' "$GUARD_OUT" | sed -n 's/^CONTINUE: pr=\([0-9][0-9]*\).*/\1/p')
                 [ -n "$PR_NUM" ] || { echo "duplicate-guard printed CONTINUE but no PR number" >&2; exit 1; }
-                if [ -z "$(jq -r '.resume_pr_number // empty' /tmp/ctx.json)" ]; then
-                  jq --arg pr "$PR_NUM" '.resume_pr_number = $pr' /tmp/ctx.json > /tmp/ctx.next.json
-                  mv /tmp/ctx.next.json /tmp/ctx.json
+                if [ -z "$(jq -r '.resume_pr_number // empty' "$LEXI_JOB_DIR/ctx.json")" ]; then
+                  jq --arg pr "$PR_NUM" '.resume_pr_number = $pr' "$LEXI_JOB_DIR/ctx.json" > "$LEXI_JOB_DIR/ctx.next.json"
+                  mv "$LEXI_JOB_DIR/ctx.next.json" "$LEXI_JOB_DIR/ctx.json"
                 fi
                 echo "Continuing existing PR #$PR_NUM for this thread."
                 ;;
@@ -437,11 +486,11 @@ jobs:
           fi
           # A dispatcher that cannot set resume_pr_number may put
           # "CONTINUE PR: <n>" on the first line of the brief instead.
-          if [ -z "$(jq -r '.resume_pr_number // empty' /tmp/ctx.json)" ]; then
-            HDR=$(jq -r '.brief' /tmp/ctx.json | sed -n 's/^CONTINUE PR: \([0-9][0-9]*\).*/\1/p' | head -1)
+          if [ -z "$(jq -r '.resume_pr_number // empty' "$LEXI_JOB_DIR/ctx.json")" ]; then
+            HDR=$(jq -r '.brief' "$LEXI_JOB_DIR/ctx.json" | sed -n 's/^CONTINUE PR: \([0-9][0-9]*\).*/\1/p' | head -1)
             if [ -n "$HDR" ]; then
-              jq --arg pr "$HDR" '.resume_pr_number = $pr' /tmp/ctx.json > /tmp/ctx.next.json
-              mv /tmp/ctx.next.json /tmp/ctx.json
+              jq --arg pr "$HDR" '.resume_pr_number = $pr' "$LEXI_JOB_DIR/ctx.json" > "$LEXI_JOB_DIR/ctx.next.json"
+              mv "$LEXI_JOB_DIR/ctx.next.json" "$LEXI_JOB_DIR/ctx.json"
               echo "Continuing PR #$HDR from the CONTINUE PR header."
             fi
           fi
@@ -540,19 +589,19 @@ jobs:
         run: |
           set -euo pipefail
           export LEXI_PROTECTED_PATHS_FILE="${protected:-}"
-          if bash .lexi-agent/agent-fix/scripts/check-brief.sh /tmp/ctx.json 2>/tmp/check-brief.err; then
-            cat /tmp/check-brief.err >&2 || true
+          if bash .lexi-agent/agent-fix/scripts/check-brief.sh "$LEXI_JOB_DIR/ctx.json" 2>"$LEXI_JOB_DIR/check-brief.err"; then
+            cat "$LEXI_JOB_DIR/check-brief.err" >&2 || true
             exit 0
           fi
-          cat /tmp/check-brief.err >&2
+          cat "$LEXI_JOB_DIR/check-brief.err" >&2
           {
             echo "Refused before starting: the brief names a path this workflow does not let an agent edit, so no code was changed."
             echo "If the fix needs that file changed, a person has to make the change. Rewording the brief will not let the agent edit it, and its push would be refused."
             echo "If the brief only mentions the file and the fix does not touch it, take the name out of the brief and dispatch again."
             echo ""
-            sed 's/^/  /' /tmp/check-brief.err
+            sed 's/^/  /' "$LEXI_JOB_DIR/check-brief.err"
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          } > /tmp/handback.txt
+          } > "$LEXI_JOB_DIR/handback.txt"
           exit 1
 
       - name: Install the skill
@@ -569,7 +618,7 @@ jobs:
             echo "Installed Lexi's ${SKILL} skill."
           else
             printf 'Agent-fix has no skill named %s, so no code was changed.\nRun: %s/%s/actions/runs/%s\n' \
-              "$SKILL" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+              "$SKILL" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
             exit 1
           fi
 
@@ -590,7 +639,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -629,7 +678,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -668,7 +717,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -707,7 +756,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -746,7 +795,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -785,7 +834,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -824,7 +873,7 @@ jobs:
           REPOSITORIES: ${{ steps.settings.outputs.repositories }}
           # Must match what the workflow documents; the agent gets no more.
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write","checks":"read","actions":"read"}'
-          TOKEN_FILE: /tmp/gh-token
+          TOKEN_FILE: ${{ env.LEXI_JOB_DIR }}/gh-token
           LEXI_TRUSTED_SHA: ${{ steps.trusted.outputs.sha }}
         run: |
           set -euo pipefail
@@ -858,17 +907,24 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          # Only when the very first step failed: the steps below still need
+          # somewhere to write the one result this run publishes.
+          if [ -z "${LEXI_JOB_DIR:-}" ] || [ ! -d "$LEXI_JOB_DIR" ]; then
+            umask 077
+            LEXI_JOB_DIR=$(/usr/bin/mktemp -d "${RUNNER_TEMP}/lexi-agent-fix.XXXXXXXX")
+            echo "LEXI_JOB_DIR=${LEXI_JOB_DIR}" >> "$GITHUB_ENV"
+          fi
           ANNOUNCEMENT=false
           HANDBACK=false
-          [ -s /tmp/announcement.txt ] && ANNOUNCEMENT=true
-          [ -s /tmp/handback.txt ] && HANDBACK=true
+          [ -s "$LEXI_JOB_DIR/announcement.txt" ] && ANNOUNCEMENT=true
+          [ -s "$LEXI_JOB_DIR/handback.txt" ] && HANDBACK=true
 
           # When nothing replaced the seed hand-back, name the step that failed
           # so the requester is told which check stopped the run. Best-effort:
           # this step must never fail, because it is what publishes a result.
-          if [ -f /tmp/handback.seed ] && cmp -s /tmp/handback.seed /tmp/handback.txt; then
-            if [ -s /tmp/gh-token ]; then
-              GH_TOKEN=$(cat /tmp/gh-token)
+          if [ -f "$LEXI_JOB_DIR/handback.seed" ] && cmp -s "$LEXI_JOB_DIR/handback.seed" "$LEXI_JOB_DIR/handback.txt"; then
+            if [ -s "$LEXI_JOB_DIR/gh-token" ]; then
+              GH_TOKEN=$(cat "$LEXI_JOB_DIR/gh-token")
               export GH_TOKEN
             fi
             FAILED_STEP=""
@@ -880,23 +936,23 @@ jobs:
             fi
             if [ -n "$FAILED_STEP" ]; then
               printf 'Agent-fix stopped before the agent produced a result: the step "%s" failed, so no code was changed.\nRun: %s/%s/actions/runs/%s\n' \
-                "$FAILED_STEP" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+                "$FAILED_STEP" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
             fi
           fi
 
           if [ "$ANNOUNCEMENT" = true ] && [ "$HANDBACK" = true ]; then
-            rm -f /tmp/announcement.txt
+            rm -f "$LEXI_JOB_DIR/announcement.txt"
             printf 'Agent-fix produced both result files, which breaks its output contract. Treat the run as a hand-back and read the agent log before retrying.\nRun: %s/%s/actions/runs/%s\n' \
-              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
           elif [ "$ANNOUNCEMENT" = false ] && [ "$HANDBACK" = false ]; then
             printf 'Agent-fix ended without a result. Read the failed step or the agent log before retrying.\nRun: %s/%s/actions/runs/%s\n' \
-              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > /tmp/handback.txt
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$LEXI_JOB_DIR/handback.txt"
           fi
 
           # Guarded: a failure before the scripts were checked out leaves only
           # the seed hand-back, which is still an honest result.
           if [ -f .lexi-agent/agent-fix/scripts/check-output-contract.sh ]; then
-            bash .lexi-agent/agent-fix/scripts/check-output-contract.sh /tmp/announcement.txt /tmp/handback.txt
+            bash .lexi-agent/agent-fix/scripts/check-output-contract.sh "$LEXI_JOB_DIR/announcement.txt" "$LEXI_JOB_DIR/handback.txt"
           else
             echo "check-output-contract.sh unavailable; relying on the seed hand-back."
           fi
@@ -908,16 +964,16 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if [ -s /tmp/announcement.txt ] && [ ! -s /tmp/handback.txt ]; then
-            { echo "### Shipped"; cat /tmp/announcement.txt; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$LEXI_JOB_DIR/announcement.txt" ] && [ ! -s "$LEXI_JOB_DIR/handback.txt" ]; then
+            { echo "### Shipped"; cat "$LEXI_JOB_DIR/announcement.txt"; } >> "$GITHUB_STEP_SUMMARY"
             echo "===== AGENT_FIX_RESULT: SHIPPED ====="
-            cat /tmp/announcement.txt
+            cat "$LEXI_JOB_DIR/announcement.txt"
             echo "===== END_AGENT_FIX_RESULT ====="
             echo "result=shipped" >> "$GITHUB_OUTPUT"
-          elif [ -s /tmp/handback.txt ] && [ ! -s /tmp/announcement.txt ]; then
-            { echo "### Handed back: needs a human"; cat /tmp/handback.txt; } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -s "$LEXI_JOB_DIR/handback.txt" ] && [ ! -s "$LEXI_JOB_DIR/announcement.txt" ]; then
+            { echo "### Handed back: needs a human"; cat "$LEXI_JOB_DIR/handback.txt"; } >> "$GITHUB_STEP_SUMMARY"
             echo "===== AGENT_FIX_RESULT: HANDBACK ====="
-            cat /tmp/handback.txt
+            cat "$LEXI_JOB_DIR/handback.txt"
             echo "===== END_AGENT_FIX_RESULT ====="
             echo "result=handback" >> "$GITHUB_OUTPUT"
           else
@@ -969,10 +1025,10 @@ jobs:
           echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
           /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
           GH_TOKEN=""
-          if [ -f /tmp/gh-token ] && [ ! -L /tmp/gh-token ]; then GH_TOKEN=$(tr -d '\r\n' < /tmp/gh-token); fi
+          if [ -f "$LEXI_JOB_DIR/gh-token" ] && [ ! -L "$LEXI_JOB_DIR/gh-token" ]; then GH_TOKEN=$(tr -d '\r\n' < "$LEXI_JOB_DIR/gh-token"); fi
           export GH_TOKEN
           node "$T/scripts/redact-output.mjs" --files \
-            /tmp/investigation.txt /tmp/announcement.txt /tmp/handback.txt /tmp/run.jsonl
+            "$LEXI_JOB_DIR/investigation.txt" "$LEXI_JOB_DIR/announcement.txt" "$LEXI_JOB_DIR/handback.txt" "$LEXI_JOB_DIR/run.jsonl"
 
       # Every earlier token was revoked when the next one was minted; this one
       # is revoked rather than left live for up to an hour.
@@ -980,27 +1036,31 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if [ -s /tmp/gh-token ]; then
+          if [ -s "$LEXI_JOB_DIR/gh-token" ]; then
             curl -q -sS -X DELETE "${GITHUB_API_URL:-https://api.github.com}/installation/token" \
-              -H "Authorization: Bearer $(cat /tmp/gh-token)" \
+              -H "Authorization: Bearer $(cat "$LEXI_JOB_DIR/gh-token")" \
               -H "Accept: application/vnd.github+json" >/dev/null 2>&1 || true
-            rm -f /tmp/gh-token
+            rm -f "$LEXI_JOB_DIR/gh-token"
           fi
-          rm -f /tmp/gh-credential-map
-          # Global git config outlives the job on a self-hosted runner.
-          git config --global --unset-all credential.https://github.com.helper 2>/dev/null || true
-          git config --global --unset-all credential.https://github.com.username 2>/dev/null || true
+          rm -f "$LEXI_JOB_DIR/gh-credential-map"
+          # The helper lives in this job's own git config file, never in the
+          # user's ~/.gitconfig, so there is nothing shared to undo. It is
+          # dropped all the same: the evidence command below has no use for it.
+          if [ -f "$LEXI_JOB_DIR/gitconfig" ]; then
+            git config --file "$LEXI_JOB_DIR/gitconfig" --unset-all credential.https://github.com.helper 2>/dev/null || true
+            git config --file "$LEXI_JOB_DIR/gitconfig" --unset-all credential.https://github.com.username 2>/dev/null || true
+          fi
 
       - name: Upload result artifact
         if: always() && steps.redact.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: agent-fix-${{ github.run_id }}
+          name: agent-fix-${{ github.run_id }}${{ inputs.artifact_suffix }}
           path: |
-            /tmp/investigation.txt
-            /tmp/announcement.txt
-            /tmp/handback.txt
-            /tmp/run.jsonl
+            ${{ env.LEXI_JOB_DIR }}/investigation.txt
+            ${{ env.LEXI_JOB_DIR }}/announcement.txt
+            ${{ env.LEXI_JOB_DIR }}/handback.txt
+            ${{ env.LEXI_JOB_DIR }}/run.jsonl
           if-no-files-found: error
 
       # Visual evidence for the reviewer: runs when a PR exists, whether the
@@ -1019,7 +1079,7 @@ jobs:
           T=$(/usr/bin/mktemp -d)
           echo "${LEXI_TRUSTED_SHA}  ${RUNNER_TEMP}/lexi-trusted.tgz" | /usr/bin/sha256sum -c --quiet -
           /usr/bin/tar -xzf "${RUNNER_TEMP}/lexi-trusted.tgz" -C "$T"
-          if [ -s /tmp/announcement.txt ] || grep -qE 'https://github.com/[^[:space:]]+/pull/[0-9]+' /tmp/handback.txt 2>/dev/null; then
+          if [ -s "$LEXI_JOB_DIR/announcement.txt" ] || grep -qE 'https://github.com/[^[:space:]]+/pull/[0-9]+' "$LEXI_JOB_DIR/handback.txt" 2>/dev/null; then
             PR=true
           else
             echo "No PR to show; nothing to capture."
@@ -1062,6 +1122,6 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: agent-fix-visuals-${{ github.run_id }}
+          name: agent-fix-visuals-${{ github.run_id }}${{ inputs.artifact_suffix }}
           path: ${{ github.workspace }}/.lexi-agent-evidence/
           if-no-files-found: ignore

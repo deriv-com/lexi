@@ -343,8 +343,10 @@ jobs:
       tracking_issue_url: ${{ steps.brief.outputs.tracking_issue_url }}
       technical_spec_path: ${{ steps.brief.outputs.technical_spec_path }}
     env:
-      # Run state. 'pending' -> 'shipped' | 'handback'; anything still
-      # 'pending' when result.json is composed is reported as 'failed'.
+      # Run state. 'pending' -> 'handback', or 'drafted' (technical-spec
+      # only); anything else when the hand-off is read is reported as 'failed'.
+      # Only steps of this file write it, each after emptying whatever the
+      # agent or the repository's commands wrote to GITHUB_ENV.
       LEXI_STATUS: pending
       HANDBACK_REASON: ""
       ATTEMPT_ID: ${{ inputs.attempt_id }}
@@ -380,6 +382,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/lexi-redactor"
           cp .lexi-agent/app-build/redact-output.mjs "$RUNNER_TEMP/lexi-redactor/redact-output.mjs"
           echo "sha=$(/usr/bin/sha256sum "$RUNNER_TEMP/lexi-redactor/redact-output.mjs" | /usr/bin/cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Every step that runs the agent or the repository's own commands ends by
+      # stopping what they left running and emptying the runner's file commands
+      # (GITHUB_ENV, GITHUB_PATH, GITHUB_OUTPUT). The helper that does it is
+      # sealed here for the same reason as the redactor.
+      - name: Seal the sandbox helper
+        id: sandbox
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lexi-sandbox"
+          cp .lexi-agent/agent-fix/scripts/agent-sandbox.sh "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh"
+          echo "sha=$(/usr/bin/sha256sum "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" | /usr/bin/cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the working directory
         id: workdir
@@ -1400,8 +1414,32 @@ jobs:
           TECH_SPEC_SECTIONS: ${{ steps.brief.outputs.technical_spec_sections }}
           WORKDIR_PREFIX: ${{ steps.workdir.outputs.prefix }}
           BRANCH_RESUMED: ${{ steps.branch.outputs.resumed }}
+          SANDBOX_SHA: ${{ steps.sandbox.outputs.sha }}
         run: |
+          echo "LEXI_STAGE=the DRAFT phase" >> "$GITHUB_ENV"
           set -uo pipefail
+          # The sandbox helper, from the copy sealed before any agent phase: the
+          # agent can write to .lexi-agent and $RUNNER_TEMP, so the digest is
+          # checked. jq and git are pinned to the system directories, because a
+          # `jq` or `git` found earlier on PATH is whatever the agent or the
+          # repository's scripts put there, and this step's verdict is computed
+          # with them. The repository's own commands and git hooks still run
+          # with the step's full PATH.
+          SB="$(/usr/bin/mktemp -d)/agent-sandbox.sh"
+          /usr/bin/cp "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" "$SB" || exit 1
+          echo "${SANDBOX_SHA}  ${SB}" | /usr/bin/sha256sum -c --quiet - || exit 1
+          # shellcheck source=/dev/null
+          source "$SB" || exit 1
+          SB_MARK="$(sandbox_mark)"
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
           mkdir -p "$RUNNER_TEMP/phase"
           # Where the branch stood before the agent touched it. The only honest
           # test of "did this phase produce anything" is whether the branch
@@ -1445,54 +1483,87 @@ jobs:
           if ! "$RUNNER_TEMP/lexi-agent.sh" DRAFT "$RUNNER_TEMP/phase/draft-prompt.txt" "$RUNNER_TEMP/phase/draft-stream.jsonl" "$RUNNER_TEMP/phase/draft-out.json"; then
             echo "::warning::DRAFT agent exited non-zero; checking for a written document anyway."
           fi
-          if [ ! -s "$TECH_SPEC_PATH" ]; then
-            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-            echo "HANDBACK_REASON=DRAFT phase wrote no technical spec at ${TECH_SPEC_PATH}" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          # Keep the document BEFORE any gate can reject it. Otherwise half an
-          # hour of model time can be discarded by the heading check or the
-          # no-changes check below, with the document left nowhere.
-          cp "$TECH_SPEC_PATH" "$RUNNER_TEMP/drafted-technical-spec.md" 2>/dev/null || true
-
-          # Commit whatever the agent left uncommitted, then judge on whether
-          # the BRANCH MOVED. An agent that commits its own work leaves a clean
-          # index, and `git diff --cached --quiet` called that "produced no
-          # changes" and discarded a finished 1655-line document.
-          git add -A
-          git reset HEAD -- .lexi/brief >/dev/null 2>&1 || true
-          git diff --cached --quiet || git commit -m "docs(spec): technical specification for ${BUILD_TASK_ID}"
-          if [ "$(git rev-parse HEAD)" = "${DRAFT_BASE_SHA}" ]; then
-            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-            echo "HANDBACK_REASON=DRAFT phase produced no changes" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          # Every required heading must be present, or the document is not the
-          # contract the orchestrator will read; a missing table would leave
-          # the criteria spread round-robin with nobody told.
-          #
-          # Sections arrive ONE PER LINE and are compared as fixed strings
-          # against the document's own '## ' lines: a name may contain a comma
-          # ("State, data and error handling") or regex metacharacters, and
-          # both used to break this check. Missing names are reported joined by
-          # ' | ' so two of them can never read as one.
-          MISSING=""
-          while IFS= read -r section; do
-            section="$(printf '%s' "$section" | sed 's/^ *//;s/ *$//')"
-            [ -z "$section" ] && continue
-            if ! sed -n 's/^## *//p' "$TECH_SPEC_PATH" | sed 's/ *$//' | grep -qxiF -- "$section"; then
-              MISSING="${MISSING}${MISSING:+ | }${section}"
+          # The verdict is a function so that every way out of it reaches the
+          # reset below: it sets DRAFT_REASON (a hand-back) or DRAFT_OK and
+          # writes nothing to the runner's file commands itself.
+          DRAFT_OK=false
+          DRAFT_REASON=""
+          judge_draft () {
+            if [ ! -s "$TECH_SPEC_PATH" ]; then
+              DRAFT_REASON="DRAFT phase wrote no technical spec at ${TECH_SPEC_PATH}"
+              return 0
             fi
-          done <<< "${TECH_SPEC_SECTIONS:-}"
-          if [ -n "$MISSING" ]; then
-            echo "Headings found in the document:"
-            sed -n 's/^## */  ## /p' "$TECH_SPEC_PATH"
-            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-            echo "HANDBACK_REASON=technical spec is missing required section(s): ${MISSING}" >> "$GITHUB_ENV"
-            exit 0
+            # Keep the document BEFORE any gate can reject it. Otherwise half an
+            # hour of model time can be discarded by the heading check or the
+            # no-changes check below, with the document left nowhere.
+            cp "$TECH_SPEC_PATH" "$RUNNER_TEMP/drafted-technical-spec.md" 2>/dev/null || true
+
+            # Commit whatever the agent left uncommitted, then judge on whether
+            # the BRANCH MOVED. An agent that commits its own work leaves a clean
+            # index, and `git diff --cached --quiet` called that "produced no
+            # changes" and discarded a finished 1655-line document.
+            git add -A
+            git reset HEAD -- .lexi/brief >/dev/null 2>&1 || true
+            git diff --cached --quiet || git commit -m "docs(spec): technical specification for ${BUILD_TASK_ID}"
+            if [ "$(git rev-parse HEAD)" = "${DRAFT_BASE_SHA}" ]; then
+              DRAFT_REASON="DRAFT phase produced no changes"
+              return 0
+            fi
+
+            # Every required heading must be present, or the document is not the
+            # contract the orchestrator will read; a missing table would leave
+            # the criteria spread round-robin with nobody told.
+            #
+            # Sections arrive ONE PER LINE and are compared as fixed strings
+            # against the document's own '## ' lines: a name may contain a comma
+            # ("State, data and error handling") or regex metacharacters, and
+            # both used to break this check. Missing names are reported joined by
+            # ' | ' so two of them can never read as one.
+            MISSING=""
+            while IFS= read -r section; do
+              section="$(printf '%s' "$section" | sed 's/^ *//;s/ *$//')"
+              [ -z "$section" ] && continue
+              if ! sed -n 's/^## *//p' "$TECH_SPEC_PATH" | sed 's/ *$//' | grep -qxiF -- "$section"; then
+                MISSING="${MISSING}${MISSING:+ | }${section}"
+              fi
+            done <<< "${TECH_SPEC_SECTIONS:-}"
+            if [ -n "$MISSING" ]; then
+              echo "Headings found in the document:"
+              sed -n 's/^## */  ## /p' "$TECH_SPEC_PATH"
+              DRAFT_REASON="technical spec is missing required section(s): ${MISSING}"
+              return 0
+            fi
+            DRAFT_OK=true
+          }
+          # The agent's own processes go before the document is judged.
+          sandbox_stop "$SB_MARK" || true
+          judge_draft
+          # The DRAFT agent ran as this user and can find this step's GITHUB_ENV,
+          # GITHUB_PATH and GITHUB_OUTPUT files (taking the variables out of its
+          # environment does not hide them). Stop what it left running and
+          # empty all three, so that a planted LEXI_STATUS, PATH entry or step
+          # output does not reach a later step. Everything this step reports is
+          # written below, after the reset, from values this shell derived.
+          SB_RC=0
+          sandbox_stop "$SB_MARK" || SB_RC=$?
+          sandbox_reset_file_commands
+          if [ -s "$GITHUB_ENV" ] || [ -s "$GITHUB_PATH" ] || [ -s "$GITHUB_OUTPUT" ]; then
+            echo "::error::The runner's file commands could not be emptied after untrusted code ran."
+            exit 1
           fi
-          echo "LEXI_STATUS=drafted" >> "$GITHUB_ENV"
+          echo "LEXI_STAGE=the DRAFT phase" >> "$GITHUB_ENV"
+          if [ "$SB_RC" -ne 0 ]; then
+            DRAFT_OK=false
+            DRAFT_REASON="processes the DRAFT agent left running could not be stopped"
+          fi
+          if [ "$DRAFT_OK" = "true" ]; then
+            # The one place `drafted` is written. The hand-off writer and
+            # `publish` both refuse it for any task kind but technical-spec.
+            echo "LEXI_STATUS=drafted" >> "$GITHUB_ENV"
+          else
+            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
+            echo "HANDBACK_REASON=${DRAFT_REASON:-DRAFT phase did not finish}" >> "$GITHUB_ENV"
+          fi
 
       # A step timeout kills the phase's shell, and can do so before the
       # runner's own trap has stopped the agent. Sweep for anything still
@@ -1536,9 +1607,32 @@ jobs:
           WORKDIR_PREFIX: ${{ steps.workdir.outputs.prefix }}
           BRANCH_RESUMED: ${{ steps.branch.outputs.resumed }}
           BRANCH_BASE_SHA: ${{ steps.branch.outputs.base_sha }}
+          SANDBOX_SHA: ${{ steps.sandbox.outputs.sha }}
         run: |
           echo "LEXI_STAGE=the RED phase" >> "$GITHUB_ENV"
           set -uo pipefail
+          # The sandbox helper, from the copy sealed before any agent phase: the
+          # agent can write to .lexi-agent and $RUNNER_TEMP, so the digest is
+          # checked. jq and git are pinned to the system directories, because a
+          # `jq` or `git` found earlier on PATH is whatever the agent or the
+          # repository's scripts put there, and this step's verdict is computed
+          # with them. The repository's own commands and git hooks still run
+          # with the step's full PATH.
+          SB="$(/usr/bin/mktemp -d)/agent-sandbox.sh"
+          /usr/bin/cp "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" "$SB" || exit 1
+          echo "${SANDBOX_SHA}  ${SB}" | /usr/bin/sha256sum -c --quiet - || exit 1
+          # shellcheck source=/dev/null
+          source "$SB" || exit 1
+          SB_MARK="$(sandbox_mark)"
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
           mkdir -p "$RUNNER_TEMP/phase"
           echo "RED phase model: ${ANTHROPIC_MODEL}"
           # One registry file per task: the task id with ":" sanitised, the
@@ -1581,17 +1675,37 @@ jobs:
           # token-usage check. The agent's final message is echoed afterwards
           # so the log stays readable by a human.
           RED_OUT="$RUNNER_TEMP/phase/red-output.json"
+          PHASE_HANDBACK=""
           if "$RUNNER_TEMP/lexi-agent.sh" RED "$RUNNER_TEMP/phase/red-prompt.txt" "$RUNNER_TEMP/phase/red-stream.jsonl" "$RED_OUT"; then
             echo "--- RED agent summary ---"; jq -r '.result // "(no result text)"' "$RED_OUT" 2>/dev/null || true
             if jq -e '.is_error == true' "$RED_OUT" > /dev/null 2>&1; then
-              echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-              echo "HANDBACK_REASON=RED-phase agent reported an error" >> "$GITHUB_ENV"
+              PHASE_HANDBACK="RED-phase agent reported an error"
               echo "::warning::RED-phase agent reported is_error; handing back."
             fi
           else
-            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-            echo "HANDBACK_REASON=RED-phase agent run failed" >> "$GITHUB_ENV"
+            PHASE_HANDBACK="RED-phase agent run failed"
             echo "::warning::RED-phase agent run failed; handing back."
+          fi
+          # The RED agent ran as this user and can find this step's GITHUB_ENV,
+          # GITHUB_PATH and GITHUB_OUTPUT files (taking the variables out of its
+          # environment does not hide them). Stop what it left running and
+          # empty all three, so that a planted LEXI_STATUS, PATH entry or step
+          # output does not reach a later step. Everything this step reports is
+          # written below, after the reset, from values this shell derived.
+          SB_RC=0
+          sandbox_stop "$SB_MARK" || SB_RC=$?
+          sandbox_reset_file_commands
+          if [ -s "$GITHUB_ENV" ] || [ -s "$GITHUB_PATH" ] || [ -s "$GITHUB_OUTPUT" ]; then
+            echo "::error::The runner's file commands could not be emptied after untrusted code ran."
+            exit 1
+          fi
+          echo "LEXI_STAGE=the RED phase" >> "$GITHUB_ENV"
+          if [ "$SB_RC" -ne 0 ]; then
+            PHASE_HANDBACK="processes the RED agent left running could not be stopped"
+          fi
+          if [ -n "$PHASE_HANDBACK" ]; then
+            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
+            echo "HANDBACK_REASON=${PHASE_HANDBACK}" >> "$GITHUB_ENV"
           fi
 
       - name: Stop anything the RED agent left running
@@ -1610,6 +1724,19 @@ jobs:
         run: |
           echo "LEXI_STAGE=committing RED" >> "$GITHUB_ENV"
           set -euo pipefail
+          # jq and git are pinned to the system directories: a `jq` or `git`
+          # found earlier on PATH is whatever the agent or the repository's
+          # scripts put there, and this step computes evidence with them. Git
+          # hooks still run with the step's full PATH.
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
           git add -A
           # .lexi/brief/ holds stable prompt inputs; never ship it in the PR.
           git reset HEAD -- .lexi/brief >/dev/null 2>&1 || true
@@ -1718,9 +1845,30 @@ jobs:
           # name itself, validates every field and trusts none of it with a
           # credential. The bundle carries only the commits on top of the
           # dispatch base.
+          #
+          # Nothing here needs the repository's toolchain, so PATH is the
+          # system directories only: whatever the agent or the repository's
+          # scripts put on PATH is not what writes the run state.
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          if ! command -v jq > /dev/null || ! command -v git > /dev/null; then
+            echo "::error::jq and git must be installed in a system directory (${PATH}) on this runner."
+            exit 1
+          fi
           H="$RUNNER_TEMP/handoff"
           mkdir -p "$H"
           rm -f "$H/branch.bundle" "$H/state.json" "$H/usage.json"
+          # `drafted` means "a technical spec was written and no evidence is
+          # expected". Only the DRAFT step sets it, and DRAFT runs only for a
+          # technical-spec task, so on any other kind it is not this file's
+          # doing: it is refused here and again in `publish`. TASK_KIND is the
+          # brief's, from a step that finished before the first agent phase.
+          STATUS="${LEXI_STATUS:-pending}"
+          REASON="${HANDBACK_REASON:-}"
+          if [ "$STATUS" = "drafted" ] && [ "${TASK_KIND:-}" != "technical-spec" ]; then
+            echo "::error::Run state says 'drafted' on a '${TASK_KIND:-code}' task. Only a technical-spec task can be drafted; handing back."
+            STATUS="handback"
+            REASON="run state was 'drafted' on a task that is not a technical spec; red/green/check evidence is required for it"
+          fi
           HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
           if [ -n "$HEAD_SHA" ] && [ -n "${BASE_SHA:-}" ] && [ "$HEAD_SHA" != "$BASE_SHA" ]; then
             if ! git bundle create "$H/branch.bundle" HEAD --not "$BASE_SHA" > /dev/null 2>&1; then
@@ -1738,8 +1886,8 @@ jobs:
           fi
           jq -n \
             --arg point "${HANDOFF_POINT:-final}" \
-            --arg status "${LEXI_STATUS:-pending}" \
-            --arg handbackReason "${HANDBACK_REASON:-}" \
+            --arg status "$STATUS" \
+            --arg handbackReason "$REASON" \
             --arg stage "${LEXI_STAGE:-}" \
             --arg jobStatus "${JOB_STATUS:-}" \
             --arg headSha "${HEAD_SHA:-}" \
@@ -1753,7 +1901,7 @@ jobs:
               jobStatus: $jobStatus, headSha: $headSha, taskKind: $taskKind, workdir: $workdir,
               model: $model, milestoneTitle: $milestoneTitle, trackingIssueUrl: $trackingIssueUrl,
               technicalSpecPath: $technicalSpecPath}' > "$H/state.json"
-          echo "Hand-off (${HANDOFF_POINT:-final}): status ${LEXI_STATUS:-pending}, head ${HEAD_SHA:-none}, files: $(cd "$H" && printf '%s ' *)"
+          echo "Hand-off (${HANDOFF_POINT:-final}): status ${STATUS}, head ${HEAD_SHA:-none}, files: $(cd "$H" && printf '%s ' *)"
 
       # An artifact is readable by anyone who can read the run, and
       # ::add-mask:: hides a secret from the log, not from a file. The JSON the
@@ -1814,9 +1962,32 @@ jobs:
           # the checkout and re-derived work that was already paid for.
           BRANCH_RESUMED: ${{ steps.branch.outputs.resumed }}
           BRANCH_BASE_SHA: ${{ steps.branch.outputs.base_sha }}
+          SANDBOX_SHA: ${{ steps.sandbox.outputs.sha }}
         run: |
           echo "LEXI_STAGE=the GREEN phase" >> "$GITHUB_ENV"
           set -uo pipefail
+          # The sandbox helper, from the copy sealed before any agent phase: the
+          # agent can write to .lexi-agent and $RUNNER_TEMP, so the digest is
+          # checked. jq and git are pinned to the system directories, because a
+          # `jq` or `git` found earlier on PATH is whatever the agent or the
+          # repository's scripts put there, and this step's verdict is computed
+          # with them. The repository's own commands and git hooks still run
+          # with the step's full PATH.
+          SB="$(/usr/bin/mktemp -d)/agent-sandbox.sh"
+          /usr/bin/cp "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" "$SB" || exit 1
+          echo "${SANDBOX_SHA}  ${SB}" | /usr/bin/sha256sum -c --quiet - || exit 1
+          # shellcheck source=/dev/null
+          source "$SB" || exit 1
+          SB_MARK="$(sandbox_mark)"
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
           echo "GREEN phase model: ${ANTHROPIC_MODEL}"
           # One registry file per task: the task id with ":" sanitised, the
           # same spelling the branch name uses.
@@ -1846,17 +2017,37 @@ jobs:
             fi
           } > "$RUNNER_TEMP/phase/green-prompt.txt"
           GREEN_OUT="$RUNNER_TEMP/phase/green-output.json"
+          PHASE_HANDBACK=""
           if "$RUNNER_TEMP/lexi-agent.sh" GREEN "$RUNNER_TEMP/phase/green-prompt.txt" "$RUNNER_TEMP/phase/green-stream.jsonl" "$GREEN_OUT"; then
             echo "--- GREEN agent summary ---"; jq -r '.result // "(no result text)"' "$GREEN_OUT" 2>/dev/null || true
             if jq -e '.is_error == true' "$GREEN_OUT" > /dev/null 2>&1; then
-              echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-              echo "HANDBACK_REASON=GREEN-phase agent reported an error" >> "$GITHUB_ENV"
+              PHASE_HANDBACK="GREEN-phase agent reported an error"
               echo "::warning::GREEN-phase agent reported is_error; handing back."
             fi
           else
-            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
-            echo "HANDBACK_REASON=GREEN-phase agent run failed" >> "$GITHUB_ENV"
+            PHASE_HANDBACK="GREEN-phase agent run failed"
             echo "::warning::GREEN-phase agent run failed; handing back."
+          fi
+          # The GREEN agent ran as this user and can find this step's GITHUB_ENV,
+          # GITHUB_PATH and GITHUB_OUTPUT files (taking the variables out of its
+          # environment does not hide them). Stop what it left running and
+          # empty all three, so that a planted LEXI_STATUS, PATH entry or step
+          # output does not reach a later step. Everything this step reports is
+          # written below, after the reset, from values this shell derived.
+          SB_RC=0
+          sandbox_stop "$SB_MARK" || SB_RC=$?
+          sandbox_reset_file_commands
+          if [ -s "$GITHUB_ENV" ] || [ -s "$GITHUB_PATH" ] || [ -s "$GITHUB_OUTPUT" ]; then
+            echo "::error::The runner's file commands could not be emptied after untrusted code ran."
+            exit 1
+          fi
+          echo "LEXI_STAGE=the GREEN phase" >> "$GITHUB_ENV"
+          if [ "$SB_RC" -ne 0 ]; then
+            PHASE_HANDBACK="processes the GREEN agent left running could not be stopped"
+          fi
+          if [ -n "$PHASE_HANDBACK" ]; then
+            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
+            echo "HANDBACK_REASON=${PHASE_HANDBACK}" >> "$GITHUB_ENV"
           fi
 
       - name: Stop anything the GREEN agent left running
@@ -1869,9 +2060,32 @@ jobs:
         env:
           PLATFORM: ${{ steps.repo.outputs.platform }}
           WORKDIR: ${{ steps.workdir.outputs.path }}
+          SANDBOX_SHA: ${{ steps.sandbox.outputs.sha }}
         run: |
           echo "LEXI_STAGE=verifying and committing GREEN" >> "$GITHUB_ENV"
           set -uo pipefail
+          # The sandbox helper, from the copy sealed before any agent phase: the
+          # agent can write to .lexi-agent and $RUNNER_TEMP, so the digest is
+          # checked. jq and git are pinned to the system directories, because a
+          # `jq` or `git` found earlier on PATH is whatever the agent or the
+          # repository's scripts put there, and this step's verdict is computed
+          # with them. The repository's own commands and git hooks still run
+          # with the step's full PATH.
+          SB="$(/usr/bin/mktemp -d)/agent-sandbox.sh"
+          /usr/bin/cp "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" "$SB" || exit 1
+          echo "${SANDBOX_SHA}  ${SB}" | /usr/bin/sha256sum -c --quiet - || exit 1
+          # shellcheck source=/dev/null
+          source "$SB" || exit 1
+          SB_MARK="$(sandbox_mark)"
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
 
           # COMMIT BEFORE JUDGING. The test gate used to come first and `exit 0`
           # on failure, so a GREEN phase that did not go green was never
@@ -1910,6 +2124,26 @@ jobs:
           else
             echo "::warning::No test runner manifest found in ${APP_DIR}; relying on the agent's own test run."
           fi
+          # The repository's test run ran as this user and can find this step's GITHUB_ENV,
+          # GITHUB_PATH and GITHUB_OUTPUT files (taking the variables out of its
+          # environment does not hide them). Stop what it left running and
+          # empty all three, so that a planted LEXI_STATUS, PATH entry or step
+          # output does not reach a later step. Everything this step reports is
+          # written below, after the reset, from values this shell derived.
+          SB_RC=0
+          sandbox_stop "$SB_MARK" || SB_RC=$?
+          sandbox_reset_file_commands
+          if [ -s "$GITHUB_ENV" ] || [ -s "$GITHUB_PATH" ] || [ -s "$GITHUB_OUTPUT" ]; then
+            echo "::error::The runner's file commands could not be emptied after untrusted code ran."
+            exit 1
+          fi
+          echo "LEXI_STAGE=verifying and committing GREEN" >> "$GITHUB_ENV"
+          if [ "$SB_RC" -ne 0 ]; then
+            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
+            echo "HANDBACK_REASON=processes the test run left running could not be stopped" >> "$GITHUB_ENV"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$TEST_OK" != "true" ]; then
             echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
             echo "HANDBACK_REASON=tests still failing after GREEN phase" >> "$GITHUB_ENV"
@@ -1937,9 +2171,32 @@ jobs:
           PLATFORM: ${{ steps.repo.outputs.platform }}
           MODEL_NAME: ${{ steps.model.outputs.name }}
           WORKDIR: ${{ steps.workdir.outputs.path }}
+          SANDBOX_SHA: ${{ steps.sandbox.outputs.sha }}
         run: |
           echo "LEXI_STAGE=running the full checks" >> "$GITHUB_ENV"
           set -uo pipefail
+          # The sandbox helper, from the copy sealed before any agent phase: the
+          # agent can write to .lexi-agent and $RUNNER_TEMP, so the digest is
+          # checked. jq and git are pinned to the system directories, because a
+          # `jq` or `git` found earlier on PATH is whatever the agent or the
+          # repository's scripts put there, and this step's verdict is computed
+          # with them. The repository's own commands and git hooks still run
+          # with the step's full PATH.
+          SB="$(/usr/bin/mktemp -d)/agent-sandbox.sh"
+          /usr/bin/cp "$RUNNER_TEMP/lexi-sandbox/agent-sandbox.sh" "$SB" || exit 1
+          echo "${SANDBOX_SHA}  ${SB}" | /usr/bin/sha256sum -c --quiet - || exit 1
+          # shellcheck source=/dev/null
+          source "$SB" || exit 1
+          SB_MARK="$(sandbox_mark)"
+          SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          LEXI_JQ="$(PATH="$SAFE_PATH" command -v jq || true)"
+          LEXI_GIT="$(PATH="$SAFE_PATH" command -v git || true)"
+          if [ -z "$LEXI_JQ" ] || [ -z "$LEXI_GIT" ]; then
+            echo "::error::jq and git must be installed in a system directory (${SAFE_PATH}) on this runner."
+            exit 1
+          fi
+          jq () { "$LEXI_JQ" "$@"; }
+          git () { "$LEXI_GIT" "$@"; }
           : > "$RUNNER_TEMP/checks.ndjson"
           run_check () {
             local name="$1"; shift
@@ -2019,6 +2276,28 @@ jobs:
             skip_check types "$SKIP_DETAIL"; skip_check lint "$SKIP_DETAIL"
             skip_check unit "$SKIP_DETAIL"; skip_check build "$SKIP_DETAIL"
           fi
+
+          # The repository's check commands ran as this user and can find this step's GITHUB_ENV,
+          # GITHUB_PATH and GITHUB_OUTPUT files (taking the variables out of its
+          # environment does not hide them). Stop what it left running and
+          # empty all three, so that a planted LEXI_STATUS, PATH entry or step
+          # output does not reach a later step. Everything this step reports is
+          # written below, after the reset, from values this shell derived.
+          SB_RC=0
+          sandbox_stop "$SB_MARK" || SB_RC=$?
+          sandbox_reset_file_commands
+          if [ -s "$GITHUB_ENV" ] || [ -s "$GITHUB_PATH" ] || [ -s "$GITHUB_OUTPUT" ]; then
+            echo "::error::The runner's file commands could not be emptied after untrusted code ran."
+            exit 1
+          fi
+          echo "LEXI_STAGE=running the full checks" >> "$GITHUB_ENV"
+          if [ "$SB_RC" -ne 0 ]; then
+            echo "LEXI_STATUS=handback" >> "$GITHUB_ENV"
+            echo "HANDBACK_REASON=processes the checks left running could not be stopped" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # The rest is this file's own bookkeeping: system directories only.
+          export PATH="$SAFE_PATH"
 
           # token-usage: one extra check carrying both phases' usage as a JSON
           # *string* in detail, from the same script result.json uses, so the
@@ -2160,6 +2439,10 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           BASE_SHA: ${{ needs.build.outputs.base_sha }}
           BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+          # The brief's task kind, from a `build` step that finished before
+          # the first agent phase. The hand-off carries a taskKind too; it is
+          # never read, because the agent's job wrote it.
+          TASK_KIND: ${{ needs.build.outputs.task_kind }}
         run: |
           set -uo pipefail
           H="$RUNNER_TEMP/handoff"
@@ -2188,8 +2471,23 @@ jobs:
             HAVE_STATE="true"
             ST="$(field status)"; POINT="$(field point)"; STAGE="$(field stage)"
             REASON="$(field handbackReason)"
-            if [ "$BUILD_RESULT" = "success" ] && [ "$POINT" = "final" ] && { [ "$ST" = "pending" ] || [ "$ST" = "drafted" ]; }; then
+            # `drafted` skips RED, GREEN and the checks, so it opens a PR only
+            # for the one kind that has none of them: the technical spec. A
+            # code task opens a PR only from `pending`, and only with the
+            # evidence required further down. Either state on the wrong kind
+            # is refused: the work is preserved and the run reported failed.
+            UNVERIFIED=""
+            if [ "$BUILD_RESULT" = "success" ] && [ "$POINT" = "final" ] && [ "$ST" = "drafted" ] && [ "${TASK_KIND:-}" = "technical-spec" ]; then
               ACTION="pr"; STATUS="pending"; REASON=""
+            elif [ "$BUILD_RESULT" = "success" ] && [ "$POINT" = "final" ] && [ "$ST" = "pending" ] && [ "${TASK_KIND:-}" != "technical-spec" ]; then
+              ACTION="pr"; STATUS="pending"; REASON=""
+            elif [ "$ST" = "drafted" ] && [ "${TASK_KIND:-}" != "technical-spec" ]; then
+              ACTION="preserve"; STATUS="failed"; UNVERIFIED="true"
+              REASON="the hand-off says 'drafted' on a task that is not a technical spec; no PR is opened without red/green/check evidence"
+              echo "::error::${REASON}"
+            elif [ "$ST" = "pending" ] && [ "$BUILD_RESULT" = "success" ] && [ "$POINT" = "final" ]; then
+              ACTION="preserve"; STATUS="failed"
+              REASON="the technical-spec run ended without a drafted document"
             elif [ "$ST" = "handback" ]; then
               ACTION="preserve"; STATUS="handback"
             else
@@ -2239,6 +2537,39 @@ jobs:
             CHECKS_SHA="$(sha_or_empty "$(jq -r '.sha // "" | strings' "$H/checks.json")")"
             CHECKS_JSON="$(jq -c '.checks | .[0:200]' "$H/checks.json")"
           fi
+          # A code task's PR needs all three phases, each bound to the commit
+          # being pushed: RED on a commit the head descends from, GREEN and the
+          # checks on the head itself, and the checks carrying all four gates.
+          # A hand-off that cannot show that is not published as a PR. This
+          # proves the files agree with the pushed commit, not that the tests
+          # ran honestly; docs/programme-contract.md says what that leaves.
+          if [ "$ACTION" = "pr" ] && [ "${TASK_KIND:-}" != "technical-spec" ]; then
+            GAP=""
+            if [ "$RED" != "true" ] || [ -z "$RED_SHA" ]; then
+              GAP="no RED evidence"
+            elif ! git merge-base --is-ancestor "$RED_SHA" "$PUSH_SHA" 2>/dev/null; then
+              GAP="RED evidence is for ${RED_SHA}, which the pushed head does not descend from"
+            elif [ "$GREEN" != "true" ]; then
+              GAP="no GREEN evidence"
+            elif [ "$GREEN_SHA" != "$PUSH_SHA" ]; then
+              GAP="GREEN evidence is for ${GREEN_SHA}, not the pushed head"
+            elif [ "$CHECKS" != "true" ]; then
+              GAP="no checks evidence"
+            elif [ "$CHECKS_SHA" != "$PUSH_SHA" ]; then
+              GAP="checks evidence is for ${CHECKS_SHA:-no commit}, not the pushed head"
+            elif ! printf '%s' "$CHECKS_JSON" | jq -e '[.[] | objects | .name] as $n | all("types", "lint", "unit", "build"; . as $c | any($n[]; . == $c))' > /dev/null 2>&1; then
+              GAP="checks evidence does not carry types, lint, unit and build"
+            fi
+            if [ -n "$GAP" ]; then
+              ACTION="preserve"; STATUS="failed"; UNVERIFIED="true"
+              REASON="the build handed off ${PUSH_SHA} without the evidence a code task needs (${GAP}); no PR is opened"
+              echo "::error::${REASON}"
+            fi
+          fi
+          # A refused hand-off posts no GREEN or checks bundle: neither is
+          # evidence for the commit being preserved. RED is still posted, as
+          # it is on a hand-back.
+          if [ "${UNVERIFIED:-}" = "true" ]; then GREEN=false; CHECKS=false; fi
           USAGE='{"phases":[]}'
           if [ -s "$H/usage.json" ] && jq -e '(.phases | type) == "array"' "$H/usage.json" > /dev/null 2>&1; then
             USAGE="$(jq -c '{model: (.model // "" | strings), phases: [.phases[] | objects]}' "$H/usage.json")"

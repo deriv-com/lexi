@@ -166,5 +166,37 @@ class ReportTest(unittest.TestCase):
         self.assertIn('run log', result)
 
 
+class TrustedImageTest(unittest.TestCase):
+    """report.sh publishes only real PNGs from the trusted check directories."""
+    PNG = bytes.fromhex('89504e470d0a1a0a') + b'\0' * 16
+
+    def trusted(self, out, path):
+        source = REPORT.read_text()
+        match = re.search(r'^trusted_image\(\) \{.*?^\}', source, re.M | re.S)
+        self.assertIsNotNone(match)
+        script = ('OUT=' + shlex.quote(str(out)) + '\nTRUSTED_IMAGE_DIRS=("$OUT/shots" "$OUT/visual")\n'
+                  + match.group() + '\ntrusted_image "$1"')
+        return subprocess.run(['bash', '-uc', script, '_', path], capture_output=True, text=True)
+
+    def test_only_regular_pngs_in_the_trusted_directories_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'checks'
+            (out / 'shots').mkdir(parents=True)
+            (out / 'visual').mkdir()
+            (out / 'shots/home__app__desktop.png').write_bytes(self.PNG)
+            (out / 'shots/env__app__desktop.png').write_bytes(b'GH_TOKEN=ghs_fake\0')
+            os.symlink('/etc/hosts', out / 'shots/link__app__desktop.png')
+            outside = Path(tmp) / 'elsewhere.png'
+            outside.write_bytes(self.PNG)
+            good = self.trusted(out, '/anything/home__app__desktop.png')
+            self.assertEqual(good.returncode, 0)
+            self.assertEqual(Path(good.stdout).resolve(), (out / 'shots/home__app__desktop.png').resolve())
+            for bad in ('/proc/self/environ', str(out / 'shots/env__app__desktop.png'),
+                        str(out / 'shots/link__app__desktop.png'), str(outside), '../../etc/passwd.png'):
+                result = self.trusted(out, bad)
+                self.assertNotEqual(result.returncode, 0, bad)
+                self.assertEqual(result.stdout, '', bad)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -42,15 +42,22 @@ workflow and the scripts it checks out always match.
 ## How a run goes
 
 1. A fallback hand-back and a deadline are written first, so the run always
-   ends with exactly one result even if setup fails.
+   ends with exactly one result even if setup fails. They, and every other
+   file the job keeps (the request, the token, the result, the transcript), go
+   in a directory created for this job alone under `RUNNER_TEMP`
+   (`$LEXI_JOB_DIR`, readable by the runner's user only), never at a fixed
+   path under `/tmp`. See [Running several at once](#running-several-at-once).
 2. The request is validated (`normalize-payload.sh`). `brief` and `requester`
    are required; resume numbers must be positive integers.
 3. The **duplicate guard** looks for earlier work on the same thread by the
    exact line `lexi-thread: <thread_ref>` in issue and PR bodies. One open PR
    means "continue that PR". Several open PRs, or a leftover issue with no PR,
    stop the run.
-4. A token is minted (`gh-token-mint.sh`) and written to a file that git and
-   `gh` read through a credential helper and a shim; nothing caches it. App
+4. A token is minted (`gh-token-mint.sh`) and written to a file in the job's
+   directory (mode 600) that git and `gh` read through a credential helper and
+   a shim; nothing caches it. The helper is set in a git config file of the
+   job's own (`GIT_CONFIG_GLOBAL`, which needs git 2.32 or newer and includes
+   the user's `~/.gitconfig`), not in `~/.gitconfig` itself. App
    tokens last an hour and a run can last two, so the agent runs in
    **segments** of at most `segment_minutes` (default 50, at most 55). Before
    each segment a step of its own mints a fresh token and revokes the previous
@@ -154,6 +161,32 @@ The rebase workflow refuses protected branch names, release and hotfix
 branches, and anything without an allowed prefix. It never resolves a conflict;
 that is a code change, which goes back through agent-fix.
 
+## Running several at once
+
+Two calls can run side by side in two ways: on a self-hosted runner host where
+several runners work as one user, or within one run when the caller fans the
+workflow out (a matrix, or two jobs that both call it).
+
+- **Files.** Each job keeps its files in a directory created for it under
+  `RUNNER_TEMP` and its git credential helper in a config file there, so one
+  job does not read another's token, overwrite its result or answer its git.
+  The agent is told the directory in its prompt, and has it as
+  `$LEXI_JOB_DIR`; a repository's own copy of the `fix` skill that still names
+  files under `/tmp` keeps working, because the prompt maps those names to the
+  directory. This removes the shared, guessable paths. It does not make
+  same-user runners a boundary: a process can still read any file of its own
+  user that it goes looking for, so jobs that must not trust each other need
+  separate users or ephemeral runners.
+- **Artifacts.** Artifact names are shared by a whole run. `agent-fix-<run_id>`
+  and `agent-fix-visuals-<run_id>` are therefore the same for every call in
+  one run: the second upload fails and that call's files are lost. A caller
+  that fans out sets `artifact_suffix` to a different value per call (for
+  example `-web`, `-api`), which is appended to both names. The result is then
+  read from the job log or the `result` output: a dispatcher that looks for
+  the artifact by its plain name does not find a suffixed one.
+- **Rebase.** `rebase-branch.yml` keeps its result the same way and uploads no
+  artifact.
+
 ## Inputs worth knowing
 
 All inputs are documented in the workflow file. The ones most repositories set:
@@ -169,6 +202,7 @@ All inputs are documented in the workflow file. The ones most repositories set:
 | `evidence_command` | empty | Writes screenshots to `$EVIDENCE_DIR`. Never fails the run. Its processes are stopped like the agent's. |
 | `segment_minutes` | `50` | Agent time per token, 10 to 55. A run gets at most seven segments. |
 | `claude_code_version` | `2.1.319` | Exact Claude Code version installed. Change it deliberately. |
+| `artifact_suffix` | empty | Set only when one run calls the workflow more than once; see [Running several at once](#running-several-at-once). |
 
 ## Testing the scripts
 

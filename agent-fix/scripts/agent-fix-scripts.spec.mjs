@@ -296,6 +296,18 @@ describe("gh-credential-helper.sh", () => {
     expect(r.stdout).toBe("username=x-access-token\npassword=read-token\n");
   });
 
+  it("finds the map in the job's own directory, and never at a shared path", () => {
+    const request = "protocol=https\nhost=github.com\npath=acme/web.git\n\n";
+    const get = (env) => run("bash", [script("gh-credential-helper.sh"), "get"], { input: request, env: { PATH: process.env.PATH, ...env } });
+    const job = join(dir, "job");
+    mkdirSync(job);
+    writeFileSync(join(job, "gh-credential-map"), `*=${join(dir, "token")}\n`);
+    expect(get({ LEXI_JOB_DIR: job }).stdout).toBe("username=x-access-token\npassword=write-token\n");
+    const none = get({});
+    expect(none.code).toBe(0);
+    expect(none.stdout).toBe("");
+  });
+
   it("does not route a repository that merely shares the prefix", () => {
     const r = helper("protocol=https\nhost=github.com\npath=acme/shared-sdk-fork.git\n\n", map);
     expect(r.stdout).toContain("password=write-token");
@@ -561,23 +573,26 @@ describe("gh-token-mint.sh", () => {
   });
 });
 
-// The segment runner reads and writes fixed /tmp paths, as the workflow does.
+// The segment runner keeps every file in the job's own directory
+// (LEXI_JOB_DIR), as the workflow does: never at a fixed path under /tmp,
+// which two jobs on one runner host would share.
 describe("run-agent-segment.sh", () => {
-  const TMP_FILES = [
-    "/tmp/agent-fix-deadline-epoch",
-    "/tmp/announcement.txt",
-    "/tmp/handback.txt",
-    "/tmp/run.jsonl",
-    "/tmp/agent-fix-session",
-    "/tmp/agent-fix-segment.jsonl",
-  ];
-  const clear = () => TMP_FILES.forEach((f) => rmSync(f, { force: true }));
-  beforeEach(clear);
-  afterEach(clear);
+  const SHARED = ["agent-fix-deadline-epoch", "announcement.txt", "handback.txt", "run.jsonl", "agent-fix-session"].map((f) => `/tmp/${f}`);
+  let job;
+  let sharedBefore;
+  beforeEach(() => {
+    job = join(dir, "job");
+    mkdirSync(job);
+    sharedBefore = SHARED.filter((f) => existsSync(f));
+  });
+  afterEach(() => {
+    // Nothing the script did may have landed on the shared paths.
+    expect(SHARED.filter((f) => existsSync(f))).toEqual(sharedBefore);
+  });
 
   // mode: "pause" (the segment limit ends it), "ship" (writes a result), "inject"
   const segment = (n, last, mode, deadlineIn = 3600) => {
-    writeFileSync("/tmp/agent-fix-deadline-epoch", String(Math.floor(Date.now() / 1000) + deadlineIn));
+    writeFileSync(join(job, "agent-fix-deadline-epoch"), String(Math.floor(Date.now() / 1000) + deadlineIn));
     const bin = join(dir, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(
@@ -586,7 +601,7 @@ describe("run-agent-segment.sh", () => {
 printf '%s\\n' "$@" > "${join(dir, "argv")}-${n}"
 echo '{"type":"system","subtype":"init","session_id":"sess-${n}"}'
 case "${mode}" in
-  ship) echo "Fixed. PR: https://github.com/acme/web/pull/1" > /tmp/announcement.txt; exit 0 ;;
+  ship) echo "Fixed. PR: https://github.com/acme/web/pull/1" > "$LEXI_JOB_DIR/announcement.txt"; exit 0 ;;
   inject) echo "LD_PRELOAD=/tmp/evil.so" >> "$GITHUB_ENV"; echo /tmp/evil >> "$GITHUB_PATH"; exit 124 ;;
   *) exit 124 ;;
 esac
@@ -610,6 +625,7 @@ esac
         SKILL: "fix",
         BRANCH_PREFIX: "lexi/",
         SEGMENT_MINUTES: "10",
+        LEXI_JOB_DIR: job,
         STUB_DIR: dir,
         LEXI_SANDBOX_REQUIRE_ENV: `STUB_DIR=${dir}`,
       },
@@ -621,13 +637,31 @@ esac
     const first = segment(1, 7, "pause");
     expect(first.code, first.stdout + first.stderr).toBe(0);
     expect(first.env).toBe("AGENT_CONTINUE=true\n");
-    expect(readFileSync("/tmp/agent-fix-session", "utf8")).toBe("sess-1");
+    expect(readFileSync(join(job, "agent-fix-session"), "utf8")).toBe("sess-1");
     const second = segment(2, 7, "ship");
     expect(second.code).toBe(0);
     expect(second.env).toBe("AGENT_CONTINUE=false\n");
     const argv = readFileSync(join(dir, "argv-2"), "utf8").split("\n");
     expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-1");
-    expect(readFileSync("/tmp/run.jsonl", "utf8").match(/"init"/g)).toHaveLength(2);
+    expect(readFileSync(join(job, "run.jsonl"), "utf8").match(/"init"/g)).toHaveLength(2);
+  });
+
+  it("tells the agent where this job's files are", () => {
+    segment(1, 7, "ship");
+    const prompt = readFileSync(join(dir, "argv-1"), "utf8");
+    expect(prompt).toContain(`${job}/ctx.json`);
+    expect(prompt).toContain(`${job}/announcement.txt`);
+    expect(prompt).not.toMatch(/\/tmp\/(ctx\.json|announcement\.txt|handback\.txt|agent-fix-deadline-epoch)/);
+  });
+
+  it("refuses to run without the job's own directory", () => {
+    const envFile = file("env-x", "");
+    const r = run("bash", [script("run-agent-segment.sh"), "1", "7"], {
+      env: { PATH: process.env.PATH, GITHUB_ENV: envFile, GITHUB_SERVER_URL: "s", GITHUB_REPOSITORY: "r", GITHUB_RUN_ID: "1", LEXI_SANDBOX: "off" },
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("LEXI_JOB_DIR");
+    expect(readFileSync(envFile, "utf8")).toBe("AGENT_CONTINUE=false\n");
   });
 
   it("drops whatever the agent wrote to the step's file commands", () => {
@@ -637,25 +671,25 @@ esac
   });
 
   it("hands back when the last segment ends without a result", () => {
-    writeFileSync("/tmp/agent-fix-session", "sess-6");
+    writeFileSync(join(job, "agent-fix-session"), "sess-6");
     const r = segment(7, 7, "pause");
     expect(r.code).toBe(124);
     expect(r.env).toBe("AGENT_CONTINUE=false\n");
-    expect(readFileSync("/tmp/handback.txt", "utf8")).toContain("used all 7 agent segments");
+    expect(readFileSync(join(job, "handback.txt"), "utf8")).toContain("used all 7 agent segments");
   });
 
   it("does not resume without a conversation to resume", () => {
     const r = segment(2, 7, "ship");
     expect(r.code).toBe(1);
     expect(existsSync(join(dir, "argv-2"))).toBe(false);
-    expect(readFileSync("/tmp/handback.txt", "utf8")).toContain("could not resume");
+    expect(readFileSync(join(job, "handback.txt"), "utf8")).toContain("could not resume");
   });
 
   it("does not start the agent when setup used the budget", () => {
     const r = segment(1, 7, "ship", 30);
     expect(r.code).toBe(1);
     expect(existsSync(join(dir, "argv-1"))).toBe(false);
-    expect(readFileSync("/tmp/handback.txt", "utf8")).toContain("used the whole budget");
+    expect(readFileSync(join(job, "handback.txt"), "utf8")).toContain("used the whole budget");
     expect(r.env).toBe("AGENT_CONTINUE=false\n");
   });
 });

@@ -190,7 +190,13 @@ else
   fi
 fi
 
-node "$RUNNER_TEMP/app-build/visual-report.mjs" "$LEXI_SHOTS_DIR" "$OUT/visual" || echo "::warning::Scoring the screenshots failed."
+# The app's own tests ran above and could have written a manifest of their
+# own: score into an empty directory, and keep nothing if scoring fails.
+rm -rf "$OUT/visual"
+if ! node "$RUNNER_TEMP/app-build/visual-report.mjs" "$LEXI_SHOTS_DIR" "$OUT/visual"; then
+  rm -rf "$OUT/visual"
+  echo "::warning::Scoring the screenshots failed."
+fi
 jq -s '.' "$OUT/checks.ndjson" > "$OUT/checks.json"
 
 write_report

@@ -5121,6 +5121,32 @@ describe("ProgrammeBuildService — rebuild benchmark recording", () => {
     expect(outcomeFor(attemptId)).not.toHaveProperty("estimatedCostUsd");
   });
 
+  it("never opens a PR for a code task whose result says 'drafted' and carries no evidence", async () => {
+    // `drafted` is the workflow's state for a technical spec: no RED, GREEN or
+    // checks ran. On a code task it would be a way round all three.
+    const { task, attemptId } = await scaffold();
+    world.evidenceByAttempt.set(attemptId, [
+      { id: "r", phase: "red", attemptId, reportedAt: null, receivedAt: new Date(0), commitSha: "h", workflowRunId: 912, checks: [], failingTests: [] },
+    ]);
+    world.resultsByRun.set(912, {
+      schemaVersion: 1,
+      taskId: task.id,
+      attemptId,
+      status: "drafted",
+      taskKind: "technical-spec",
+      prNumber: 92,
+      headSha: "h",
+    });
+    world.prState.set(92, { state: "open", merged: false, headSha: "h", mergeable: true, baseRef: "main" });
+
+    await world.service.advance();
+
+    const after = await world.store.getBuildTask(task.id);
+    expect(after?.status).not.toBe("PR_OPEN");
+    expect(after?.prNumber ?? null).toBeNull();
+    expect(outcomeFor(attemptId)?.outcome).not.toBe("shipped");
+  });
+
   it("meters a handback from result.tokenUsage when no evidence bundle carried usage", async () => {
     const { task, attemptId } = await scaffold();
     world.evidenceByAttempt.set(attemptId, [

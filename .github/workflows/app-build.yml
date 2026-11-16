@@ -23,9 +23,11 @@
 #            `build` ends. It does not wait for `assess`, so the builder never
 #            sits idle through the checks (checks and review can take over an
 #            hour, enough to push a session past the 6-hour job limit).
-#   assess — the light checks and an independent code review of the session,
-#            posted as an assessment comment. The next session's segments read
-#            the latest one (feedback.sh) and fix it first. Report-only.
+#   assess — the light checks and an independent code review of the session.
+#            It runs the builder's code, so it holds no write token.
+#   report — on a fresh runner, posts the redacted assessment as a comment
+#            (and its images). The next session's segments read the latest
+#            one this App posted (feedback.sh) and fix it first. Report-only.
 #
 # Gate: vars.LEXI_APP_BUILD_ENABLED == "true" on the calling repository.
 #
@@ -481,6 +483,9 @@ jobs:
     env:
       # `secrets` is not available in a step's `if:`; a job env var is.
       HAS_SLACK: ${{ secrets.slack_webhook_url != '' }}
+      # feedback.sh trusts a report or assessment comment only when this App
+      # posted it. An App id is not a secret: it identifies, it grants nothing.
+      LEXI_APP_ID: ${{ secrets.app_id }}
     outputs:
       continue: ${{ steps.decide.outputs.continue }}
       continue_for_caller: ${{ inputs.chain != 'true' && steps.decide.outputs.continue || 'false' }}
@@ -1017,8 +1022,8 @@ jobs:
         env:
           APP_ID: ${{ secrets.app_id }}
           APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-          # Push the branch, open its draft PR, push the report images to
-          # app-build-reports and comment the session report on the PR.
+          # Push the branch, open its draft PR and comment the session report
+          # on the PR. (Report images are published only by the report job.)
           PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write"}'
           OUTPUT_NAME: token
           LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
@@ -1259,12 +1264,18 @@ jobs:
       contents: read
       # To start the next session when an idle loop's assessment finds work.
       actions: write
+    # This job runs the builder's code, so it never holds a write token. The
+    # report job publishes from the redacted artifact this job leaves.
+    outputs:
+      report: ${{ steps.ready.outputs.report }}
     defaults:
       run:
         # No ~/.bashrc or BASH_ENV: the builder's code could have written one.
         shell: /bin/bash --noprofile --norc -eo pipefail {0}
     env:
       LEXI_START_SHA: ${{ needs.build.outputs.start_sha }}
+      # See the build job: feedback.sh trusts only comments this App posted.
+      LEXI_APP_ID: ${{ secrets.app_id }}
       LEXI_TRACK_SOURCES: "false"
       LEXI_REVIEW_MODEL: ${{ inputs.assess_model != '' && inputs.assess_model || (inputs.review_model != '' && inputs.review_model || inputs.model) }}
     steps:
@@ -1402,45 +1413,6 @@ jobs:
           /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
           exec /bin/bash "$RUNNER_TEMP/app-build/assess.sh" review
 
-      - name: Mint a fresh token (report)
-        id: app2
-        if: ${{ !cancelled() && steps.checks.outcome != 'failure' && steps.review.outcome != 'failure' }}
-        env:
-          APP_ID: ${{ secrets.app_id }}
-          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
-          # Push the report images to app-build-reports and comment the
-          # assessment on the PR.
-          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write"}'
-          OUTPUT_NAME: token
-          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
-        run: |
-          set -euo pipefail
-          # Fresh tools from the archive sealed before any builder code ran.
-          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
-          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
-          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
-          exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
-
-      - name: Post the assessment to the PR
-        if: ${{ !cancelled() && steps.app2.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ steps.app2.outputs.token }}
-          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
-          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
-          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
-          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
-          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
-          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
-          LEXI_TOOLS_SHA: ${{ steps.tools.outputs.sha }}
-        run: |
-          set -euo pipefail
-          # Fresh tools from the archive sealed before any builder code ran.
-          echo "${LEXI_TOOLS_SHA}  ${RUNNER_TEMP}/app-build.tgz" | /usr/bin/sha256sum -c --quiet -
-          /usr/bin/rm -rf "${RUNNER_TEMP}/app-build" && /usr/bin/mkdir "${RUNNER_TEMP}/app-build"
-          /usr/bin/tar -xzf "${RUNNER_TEMP}/app-build.tgz" -C "${RUNNER_TEMP}/app-build"
-          exec /bin/bash "$RUNNER_TEMP/app-build/report.sh" assessment
-
       - name: Start the next session if the assessment found work for an idle builder
         # Not after a part that left processes running: this step holds an
         # actions:write token.
@@ -1507,3 +1479,86 @@ jobs:
             ${{ runner.temp }}/review.md.json
           if-no-files-found: ignore
           retention-days: 14
+
+      # Hand the report job a go only when both parts stopped everything they
+      # started and the logs were redacted, so it publishes nothing unredacted.
+      - name: Ready for the report job
+        id: ready
+        if: ${{ !cancelled() && steps.checks.outcome != 'failure' && steps.review.outcome != 'failure' && steps.redact-logs.outcome == 'success' }}
+        run: echo "report=true" >> "$GITHUB_OUTPUT"
+
+  # Publishes the assessment: pushes its images to app-build-reports and posts
+  # the comment. A fresh job on a fresh GitHub-hosted runner, so nothing the
+  # builder's code ran or wrote in the assess job (processes, files, git
+  # configuration, a changed binary, the environment) is present here. It
+  # reads only the redacted artifact, takes images by file name from the
+  # trusted directories (report.sh), and is the only job that holds the
+  # write token.
+  report:
+    needs: [build, assess]
+    if: ${{ !cancelled() && needs.assess.outputs.report == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only to check out the builder tools; everything it writes uses the App token.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+    env:
+      LEXI_HEAD_SHA: ${{ needs.build.outputs.head_sha }}
+    steps:
+      - name: Load the builder tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ inputs.lexi_repository }}
+          ref: ${{ inputs.lexi_ref }}
+          path: .lexi-app-build
+          persist-credentials: false
+
+      - name: Stage the builder tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/app-build"
+          cp -R .lexi-app-build/app-build/. "$RUNNER_TEMP/app-build/"
+          cp .lexi-app-build/agent-fix/scripts/gh-token-mint.sh "$RUNNER_TEMP/app-build/"
+          rm -rf "$RUNNER_TEMP/app-build/tests" .lexi-app-build
+          chmod +x "$RUNNER_TEMP/app-build/"*.sh
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Fetch the redacted assessment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: app-build-${{ inputs.app }}${{ inputs.track != '' && format('-{0}', inputs.track) || '' }}-s${{ inputs.session }}-assessment
+          path: ${{ runner.temp }}
+
+      - name: Mint a token (report)
+        id: app
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          # Push the report images to app-build-reports and comment the
+          # assessment on the PR.
+          PERMISSIONS_JSON: '{"contents":"write","pull_requests":"write","issues":"write"}'
+          OUTPUT_NAME: token
+        run: exec /bin/bash "${RUNNER_TEMP}/app-build/gh-token-mint.sh"
+
+      - name: Post the assessment to the PR
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PR: ${{ needs.build.outputs.pr }}
+          # Given only so report.sh redacts them by value; nothing here uses them.
+          STAGING_TEST_EMAIL: ${{ secrets.staging_test_email }}
+          STAGING_TEST_PASSWORD: ${{ secrets.staging_test_password }}
+          STAGING_REAL_EMAIL: ${{ secrets.staging_real_email }}
+          STAGING_REAL_PASSWORD: ${{ secrets.staging_real_password }}
+          MAILISK_API_KEY: ${{ secrets.mailisk_api_key }}
+          MAILISK_NAMESPACE: ${{ secrets.mailisk_namespace }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PR" > "$RUNNER_TEMP/pr-number"
+          exec /bin/bash "$RUNNER_TEMP/app-build/report.sh" assessment

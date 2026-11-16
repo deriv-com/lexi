@@ -10,7 +10,7 @@ hand. Someone in a chat thread described a problem or asked for a change. Your
 job is to turn that into a pull request a human can review, or to say clearly
 why you could not.
 
-Everything you need is in `/tmp/ctx.json`:
+Everything you need is in `$LEXI_JOB_DIR/ctx.json`:
 
 | Field | Meaning |
 |---|---|
@@ -37,7 +37,7 @@ The workflow prompt also tells you the branch prefix and where the deadline is.
 - Issues are always unassigned. Never request reviewers, never merge, never
   approve, never close anything you did not open in this run.
 - Never print, log or commit a token, a secret, or the contents of
-  `/tmp/gh-token*`.
+  `$LEXI_JOB_DIR/gh-token*`.
 - Keep the change small. Fix the reported problem; note other problems you
   noticed in the issue instead of fixing them.
 
@@ -50,7 +50,7 @@ The workflow prompt also tells you the branch prefix and where the deadline is.
 3. Reproduce it if the repository makes that practical (a failing test is the
    best reproduction). If you cannot reproduce it, say so in the issue and
    explain why you believe your localisation anyway.
-4. Write what you found to `/tmp/investigation.txt`: the symptom, the cause
+4. Write what you found to `$LEXI_JOB_DIR/investigation.txt`: the symptom, the cause
    with file and line references, and how you confirmed it. The workflow
    uploads it with the result, so a reviewer can follow your reasoning even if
    the run hands back.
@@ -97,7 +97,7 @@ The workflow prompt also tells you the branch prefix and where the deadline is.
 1. `gh pr checks <N> --watch` (or poll `gh pr checks <N>` with a pause). Never
    call a PR green on the strength of your own local run.
 2. Before each wait and each fix iteration, read the deadline:
-   `deadline=$(cat /tmp/agent-fix-deadline-epoch); now=$(date +%s)`. When
+   `deadline=$(cat $LEXI_JOB_DIR/agent-fix-deadline-epoch); now=$(date +%s)`. When
    fewer than five minutes remain, stop and hand back with the state so far.
 3. If a check fails because of your change, fix it and push. At most **two**
    CI-fix iterations; after that, hand back.
@@ -109,15 +109,15 @@ The workflow prompt also tells you the branch prefix and where the deadline is.
 
 Write **exactly one** of these, then verify:
 
-- `/tmp/announcement.txt` — the PR is open and CI is green (or only a disclosed
+- `$LEXI_JOB_DIR/announcement.txt` — the PR is open and CI is green (or only a disclosed
   flake remains). Two to five short lines a person in the chat thread can read:
   what was wrong, what changed, the PR link, anything the reviewer should check.
-- `/tmp/handback.txt` — you stopped before that point. Say what you found, what
+- `$LEXI_JOB_DIR/handback.txt` — you stopped before that point. Say what you found, what
   you did (issue and PR links if any), why you stopped, and the one thing a
   human needs to do or decide next.
 
 ```bash
-"$LEXI_AGENT_SCRIPTS/check-output-contract.sh" /tmp/announcement.txt /tmp/handback.txt
+"$LEXI_AGENT_SCRIPTS/check-output-contract.sh" $LEXI_JOB_DIR/announcement.txt $LEXI_JOB_DIR/handback.txt
 ```
 
 It must print `OUTCOME: shipped` or `OUTCOME: handback`. If it reports a

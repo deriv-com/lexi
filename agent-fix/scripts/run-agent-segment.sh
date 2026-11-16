@@ -27,12 +27,14 @@
 # nothing.
 #
 # Environment (from the workflow step): MODEL, MODEL_BASE_URL, MODEL_API_KEY,
-# MAX_TURNS, SKILL, BRANCH_PREFIX, SEGMENT_MINUTES.
+# MAX_TURNS, SKILL, BRANCH_PREFIX, SEGMENT_MINUTES, and LEXI_JOB_DIR: the
+# directory the workflow created for this job alone. Nothing is read from or
+# written to a fixed path under /tmp, which every job on a self-hosted runner
+# host shares.
 #
-# Files: /tmp/agent-fix-deadline-epoch (read), /tmp/ctx.json (read by the
-# agent), /tmp/announcement.txt and /tmp/handback.txt (the result),
-# /tmp/run.jsonl (the transcript, appended), /tmp/agent-fix-session (the
-# conversation to resume).
+# Files, all in $LEXI_JOB_DIR: agent-fix-deadline-epoch (read), ctx.json (read
+# by the agent), announcement.txt and handback.txt (the result), run.jsonl (the
+# transcript, appended), agent-fix-session (the conversation to resume).
 
 main() {
   set -uo pipefail
@@ -45,23 +47,31 @@ main() {
   MARK=$(sandbox_mark)
 
   local RUN="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-  local SESSION_FILE=/tmp/agent-fix-session
-  local SEG_LOG=/tmp/agent-fix-segment.jsonl
+  # No fallback to a shared path: without the job's own directory there is no
+  # request to read and nowhere safe to put a result.
+  local JOB=${LEXI_JOB_DIR:-}
+  if [ -z "$JOB" ] || [ ! -d "$JOB" ]; then
+    echo "::error::run-agent-segment: LEXI_JOB_DIR is not set to this job's directory." >&2
+    finish 1 false
+    return
+  fi
+  local SESSION_FILE=$JOB/agent-fix-session
+  local SEG_LOG=$JOB/agent-fix-segment.jsonl
   local DEADLINE REMAINING SEG LIMIT RC=0 CONTINUE=false SID="" STOP_RC=0
 
-  has_result() { [ -s /tmp/announcement.txt ] || [ -s /tmp/handback.txt ]; }
+  has_result() { [ -s "$JOB/announcement.txt" ] || [ -s "$JOB/handback.txt" ]; }
   handback() { # text — only when the agent wrote no result of its own
     has_result && return 0
-    printf '%s\nRun: %s\n' "$1" "$RUN" > /tmp/handback.txt
+    printf '%s\nRun: %s\n' "$1" "$RUN" > "$JOB/handback.txt"
   }
 
-  DEADLINE=$(cat /tmp/agent-fix-deadline-epoch 2>/dev/null || echo 0)
+  DEADLINE=$(cat "$JOB/agent-fix-deadline-epoch" 2>/dev/null || echo 0)
   case "$DEADLINE" in ''|*[!0-9]*) DEADLINE=0 ;; esac
   REMAINING=$(( DEADLINE - $(date +%s) ))
   SEG=$(( ${SEGMENT_MINUTES:-50} * 60 ))
 
   if [ "$N" = 1 ]; then
-    rm -f /tmp/announcement.txt /tmp/handback.txt
+    rm -f "$JOB/announcement.txt" "$JOB/handback.txt"
   fi
 
   if [ "$REMAINING" -lt 60 ]; then
@@ -85,10 +95,13 @@ main() {
   unset MODEL_API_KEY
   export LEXI_AGENT_SCRIPTS="${GITHUB_WORKSPACE}/.lexi-agent/agent-fix/scripts"
 
+  # The skill names its files under /tmp; the prompt says where they are for
+  # this job, so a repository's own copy of the skill keeps working unchanged.
+  local WHERE="Your working files for this run are in the directory ${JOB} (also in \$LEXI_JOB_DIR), not in /tmp: wherever the skill or these instructions name a file /tmp/<name>, use ${JOB}/<name> instead."
   local PROMPT
   local -a RESUME=()
   if [ "$N" = 1 ]; then
-    PROMPT="/${SKILL} Read /tmp/ctx.json first. 'brief' is a symptom or a request, not a specification: investigate and localise the cause before writing code. Follow the repository's CLAUDE.md or AGENTS.md, and .lexi/fix.md if it exists. Branches are always '${BRANCH_PREFIX}<topic>'; issues are always unassigned. If resume_pr_number is set, check out that PR and continue on its branch; do not open a second PR. If resume_issue_number is set, reuse that issue and keep its lexi-thread anchor instead of creating another. Otherwise file the issue right after investigating, before any code. Open the PR with 'Closes #N' only when resume_pr_number is empty, then wait for real CI with 'gh pr checks'; never call a PR green on your own local run. Fix failures your change caused, with at most two CI-fix iterations; re-run a suspected flake once before treating it as real, and disclose any tolerated flake in the result. Before each wait or fix iteration, read /tmp/agent-fix-deadline-epoch and hand back when fewer than five minutes remain. Write exactly one of /tmp/announcement.txt or /tmp/handback.txt and verify it with \$LEXI_AGENT_SCRIPTS/check-output-contract.sh before exiting. Run nothing in the background that you expect to outlive your turn: the workflow stops every process you started when you exit or are paused."
+    PROMPT="/${SKILL} ${WHERE} Read ${JOB}/ctx.json first. 'brief' is a symptom or a request, not a specification: investigate and localise the cause before writing code. Follow the repository's CLAUDE.md or AGENTS.md, and .lexi/fix.md if it exists. Branches are always '${BRANCH_PREFIX}<topic>'; issues are always unassigned. If resume_pr_number is set, check out that PR and continue on its branch; do not open a second PR. If resume_issue_number is set, reuse that issue and keep its lexi-thread anchor instead of creating another. Otherwise file the issue right after investigating, before any code. Open the PR with 'Closes #N' only when resume_pr_number is empty, then wait for real CI with 'gh pr checks'; never call a PR green on your own local run. Fix failures your change caused, with at most two CI-fix iterations; re-run a suspected flake once before treating it as real, and disclose any tolerated flake in the result. Before each wait or fix iteration, read ${JOB}/agent-fix-deadline-epoch and hand back when fewer than five minutes remain. Write exactly one of ${JOB}/announcement.txt or ${JOB}/handback.txt and verify it with \$LEXI_AGENT_SCRIPTS/check-output-contract.sh before exiting. Run nothing in the background that you expect to outlive your turn: the workflow stops every process you started when you exit or are paused."
   else
     SID=$(cat "$SESSION_FILE" 2>/dev/null || true)
     if [ -z "$SID" ]; then
@@ -96,7 +109,7 @@ main() {
       finish 1 false
       return
     fi
-    PROMPT="You were paused so the workflow could give you fresh GitHub credentials; nothing else changed, and git and gh pick them up on their own. Processes you had running were stopped: start again anything you still need. Carry on with the same task from where you stopped, under the same rules: read /tmp/agent-fix-deadline-epoch before each wait or fix iteration and hand back when fewer than five minutes remain, and write exactly one of /tmp/announcement.txt or /tmp/handback.txt, verified with \$LEXI_AGENT_SCRIPTS/check-output-contract.sh, before exiting."
+    PROMPT="You were paused so the workflow could give you fresh GitHub credentials; nothing else changed, and git and gh pick them up on their own. Processes you had running were stopped: start again anything you still need. Carry on with the same task from where you stopped, under the same rules: your working files are still in ${JOB}, read ${JOB}/agent-fix-deadline-epoch before each wait or fix iteration and hand back when fewer than five minutes remain, and write exactly one of ${JOB}/announcement.txt or ${JOB}/handback.txt, verified with \$LEXI_AGENT_SCRIPTS/check-output-contract.sh, before exiting."
     RESUME=(--resume "$SID")
   fi
 
@@ -112,7 +125,7 @@ main() {
     --model "$MODEL" \
     --max-turns "$MAX_TURNS" \
     --verbose \
-    --output-format stream-json < /dev/null | tee -a /tmp/run.jsonl "$SEG_LOG"
+    --output-format stream-json < /dev/null | tee -a "$JOB/run.jsonl" "$SEG_LOG"
   RC=${PIPESTATUS[0]}
 
   # Everything that runs a command from PATH happens before the sweep: a

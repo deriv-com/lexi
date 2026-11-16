@@ -41,7 +41,8 @@ elif args[:2] == ['pr', 'comment']:
     t = datetime.datetime.strptime(at, '%Y-%m-%dT%H:%M:%SZ') + datetime.timedelta(minutes=1)
     new_id = max([c['id'] for c in comments] + [9000]) + 1
     comments.append({'id': new_id, 'node_id': 'IC_report%d' % new_id, 'created_at': t.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                     'user': {'login': 'lexi-github-app[bot]', 'type': 'Bot'}, 'body': body})
+                     'user': {'login': 'lexi-github-app[bot]', 'type': 'Bot'},
+                     'performed_via_github_app': {'id': 4242}, 'body': body})
     json.dump(fixtures, open(path_f, 'w'))
     open(os.path.join(os.environ['RUNNER_TEMP'], 'posted.md'), 'w').write(body)
     sys.exit(0)
@@ -190,6 +191,9 @@ def comment(cid, at, who='alice', body=None, kind='comment', human=None, path='s
     body = body if body is not None else f'Please fix item {cid}. MARK-{cid}-END'
     item = {'id': cid, 'node_id': f'IC_node{cid}', 'user': {'login': who, 'type': 'User' if human else 'Bot'},
             'author_association': assoc, 'body': body}
+    if who == 'lexi-github-app[bot]':
+        # Posted with the workflow's App token, as report.sh does.
+        item['performed_via_github_app'] = {'id': 4242}
     if kind == 'review':
         item['submitted_at'] = at
         item['node_id'] = f'PRR_node{cid}'
@@ -298,7 +302,7 @@ class Workspace:
         env = {
             'PATH': f'{self.bin}:{system_path()}',
             'HOME': os.environ.get('HOME', str(self.root)),
-            'LEXI_APP': 'web', 'LEXI_APP_DIR': 'app/web', 'LEXI_DOCS_DIR': DOCS, 'LEXI_APP_LABEL': 'Example app',
+            'LEXI_APP': 'web', 'LEXI_APP_ID': '4242', 'LEXI_APP_DIR': 'app/web', 'LEXI_DOCS_DIR': DOCS, 'LEXI_APP_LABEL': 'Example app',
             'LEXI_SESSION': str(self.session), 'LEXI_MAX_SESSIONS': '30', 'LEXI_SEGMENTS': '3',
             'LEXI_SEGMENT_MINUTES': '1', 'LEXI_MODEL': 'stub-model', 'LEXI_TESTS': 'unit',
             'LEXI_BROWSER_CHECK': 'false', 'LEXI_BRANCH': 'lexi/build-web', 'LEXI_RESUME_SEGMENTS': 'false',

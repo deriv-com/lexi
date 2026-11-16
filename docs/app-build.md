@@ -46,7 +46,10 @@ and the scripts it checks out always match.
   read-only reviewer whose pass is the approval. `gate_mode: advisory` judges each phase
   once and moves on, carrying the findings forward.
 - After each session an **assessment** job runs the light checks and an independent
-  code review and posts the result to the PR. The next session fixes it first.
+  code review. A separate **report** job, on a fresh GitHub-hosted runner that never runs
+  the builder's code, publishes the redacted result to the PR. The next session fixes it
+  first, but only an assessment comment posted by the workflow's own GitHub App, for the
+  same app and track: marker text in anyone else's comment is ignored.
 - PR comments from `feedback_authors` are delivered to the builder in bounded batches;
   a cursor file on the build branch records what was processed. List the logins whose
   comments the builder should act on. `"*"` admits anyone GitHub reports as the
@@ -75,8 +78,8 @@ GitHub would otherwise grant everything the installation has):
 | `build` → `app`, `assess` → `app` | Fetch the branch, sources and intake issues; read the PR's feedback | contents, issues, pull requests: read (+ checks, actions: read where granted) |
 | `build` → `refapp` | Clone the reference repositories | contents: read |
 | `build` → `app1`, `app2` | Push between segments, open the draft PR, read the feedback again | contents, pull requests: write; issues: read (+ checks, actions: read where granted) |
-| `build` → `app3` | Final push, report images to `app-build-reports`, the session report comment | contents, pull requests, issues: write |
-| `assess` → `app2` | Report images and the assessment comment | contents, pull requests, issues: write |
+| `build` → `app3` | Final push and the session report comment (only the report job publishes images) | contents, pull requests, issues: write |
+| `report` → `app` | Report images and the assessment comment (a fresh job; the assess job holds no write token) | contents, pull requests, issues: write |
 
 `chain` dispatches the next session with the job's own `GITHUB_TOKEN` (the caller grants
 `actions: write`), never with an App token.
@@ -86,9 +89,17 @@ started, however it detached (`agent-sandbox.sh`), putting back the git configur
 and hooks the builder could have changed, and discarding anything it wrote to the
 step's `GITHUB_ENV`, `GITHUB_PATH` or `GITHUB_OUTPUT`. The builder tools are sealed
 (archived with their digest recorded) before any of the builder's code runs, and every
-later step unpacks a verified copy. If a segment cannot stop everything, the job mints
-no further token and posts nothing more to Slack. The limits are in
-[threat-model.md](threat-model.md).
+later step unpacks a verified copy. The saved git configuration is checked against a
+digest held in memory before it is put back, and if it changed the segment fails. If a
+segment cannot stop everything, the job mints no further token and posts nothing more
+to Slack. The limits are in [threat-model.md](threat-model.md).
+
+Every git command that holds an App token (`push.sh`, `report.sh`) runs with a fresh
+empty `HOME`, no system or global configuration, hooks and the file-system monitor off,
+and a credential helper that answers only for `https://github.com`, so configuration the
+builder or a test left behind runs nothing and cannot redirect the token. Report images
+are taken by file name from the checks' own screenshot and diff directories, and only
+regular PNG files are published; a manifest entry pointing elsewhere is skipped.
 
 Staging credentials are optional. They reach only build-phase segments (the planning
 phases never sign in), the push steps and the checks, and every push is refused if a
@@ -128,6 +139,9 @@ The loop stops when:
     the session report.
   - `<!-- app-build:assessment app=<app> [track=<track>] session=<n> -->`: the checks and
     review of that session.
+- The builder trusts these markers only in comments GitHub records as posted by the
+  workflow's App (`performed_via_github_app`), so the workflow passes `secrets.app_id`
+  to `feedback.sh` as `LEXI_APP_ID`. Without it no report or assessment is trusted.
 - [`packages/app-build`](../packages/app-build/src/report.ts) parses both, so a chat
   integration can relay them without scraping.
 
