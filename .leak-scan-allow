@@ -10,3 +10,5 @@ examples/workflows/*.yml | uses: deriv-com/lexi/.github/workflows/  # example ca
 .leak-scan-allow | uses: deriv-com/lexi/.github/workflows/  # the example-caller allowlist entry above
 .github/CODEOWNERS | @muthina-deriv  # the maintainer's public GitHub login
 .leak-scan-allow | @muthina-deriv  # the CODEOWNERS allowlist entry above
+commit * | author: muthina@regentmarkets.com  # a maintainer's public commit email (merges made in the GitHub UI)
+.leak-scan-allow | author: muthina@regentmarkets.com  # the commit-author allowlist entry above

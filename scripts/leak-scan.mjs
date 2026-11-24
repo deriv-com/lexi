@@ -57,7 +57,9 @@ export function parsePrivateRules(text) {
 
 /**
  * Parses `.leak-scan-allow`. Each entry is `<path glob> | <literal text>  # reason`: a finding is
- * allowed when its file matches the glob and its line contains the literal text.
+ * allowed when its file matches the glob and its line contains the literal text. With --metadata
+ * the "file" is the entry's name: `commit <sha>`, `pull request branch`, `pull request title` or
+ * `pull request body`.
  */
 export function parseAllowlist(text) {
   const entries = [];
@@ -209,7 +211,7 @@ function main(argv) {
 
   if (argv.includes("--metadata")) {
     const entries = metadataEntries();
-    const findings = entries.flatMap((e) => scanText(e.file, e.text, rules));
+    const findings = entries.flatMap((e) => scanText(e.file, e.text, rules, allowlist));
     for (const f of findings) console.log(`${f.file}:${f.line}: ${f.rule}: ${redact(f.match)}`);
     console.log(`leak-scan --metadata: ${entries.length} entries, ${findings.length} finding(s)`);
     if (findings.length && !reportOnly) process.exit(1);
