@@ -321,7 +321,7 @@ const queueSay=(id,text)=>{ sayChain=sayChain.then(()=>say(id,text)).catch(()=>{
 const SAFE_TAGS=new Map([
   "a","article","aside","b","blockquote","br","button","code","dd","div","dl","dt",
   "em","figcaption","figure","footer","h1","h2","h3","h4","h5","h6","header","hr",
-  "i","img","kbd","label","li","main","mark","nav","ol","p","pre","s","section",
+  "i","kbd","label","li","main","mark","nav","ol","p","pre","s","section",
   "small","span","strong","sub","sup","table","tbody","td","tfoot","th","thead","time","tr","u","ul",
 ].map(t=>[t,t]));
 const VOID_TAGS=new Set(["area","base","br","col","embed","hr","img","input","link","meta","source","track","wbr"]);
@@ -335,10 +335,6 @@ function decodeEntities(str){
     }
     return Object.hasOwn(NAMED_ENTITIES,body)?NAMED_ENTITIES[body]:m;
   });
-}
-function isSafeRelativeUrl(val){
-  const v=String(val||"").trim();
-  return v.startsWith("#")||(v.startsWith("/")&&!v.startsWith("//")&&!v.startsWith("/\\"));
 }
 function sanitizeInlineStyle(val){
   return String(val||"").split(";").map(d=>d.trim()).filter(d=>{
@@ -386,7 +382,6 @@ function applySafeAttributes(node,tag,attrs){
     switch(name){
       case "class": node.className=val; break;
       case "title": node.title=val; break;
-      case "alt": if(tag==="img") node.setAttribute("alt",val); break;
       case "aria-label": node.setAttribute("aria-label",val); break;
       case "aria-hidden": if(val==="true"||val==="false") node.setAttribute("aria-hidden",val); break;
       case "aria-current": node.setAttribute("aria-current",val); break;
@@ -395,11 +390,10 @@ function applySafeAttributes(node,tag,attrs){
       case "colspan": if(/^\d{1,2}$/.test(val)) node.setAttribute("colspan",val); break;
       case "rowspan": if(/^\d{1,2}$/.test(val)) node.setAttribute("rowspan",val); break;
       case "type": if(tag==="button"&&(val==="button"||val==="reset")) node.setAttribute("type",val); break;
-      case "href": if(isSafeRelativeUrl(val)) node.setAttribute("href",val.trim()); break;
-      case "src": if(isSafeRelativeUrl(val)) node.setAttribute("src",val.trim()); break;
       case "style": { const s=sanitizeInlineStyle(val); if(s) node.setAttribute("style",s); break; }
     }
   }
+  if(tag==="a") node.setAttribute("href","#");
   if(tag==="button"&&!node.hasAttribute("type")) node.setAttribute("type","button");
 }
 function renderSafeHtml(container,html){
