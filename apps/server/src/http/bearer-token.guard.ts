@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { scryptSync, timingSafeEqual } from "node:crypto";
 import {
   CanActivate,
   ExecutionContext,
@@ -13,8 +13,9 @@ import { CONFIG_TOKEN } from "../tokens";
  * Guards the action endpoints with a shared bearer token (`PROCESS_API_TOKEN`).
  *
  * An unset token refuses every request: an unconfigured deployment must not
- * expose an open write path. The comparison is constant-time over SHA-256
- * digests, so neither the token's content nor its length leaks through timing.
+ * expose an open write path. The comparison is constant-time over scrypt
+ * digests, so neither the token's content nor its length leaks through timing,
+ * and the work factor is what a credential hash requires.
  */
 @Injectable()
 export class BearerTokenGuard implements CanActivate {
@@ -42,8 +43,11 @@ export function bearerToken(header: string | string[] | undefined): string | und
   return match ? match[1] : undefined;
 }
 
+/** Fixed salt: both sides are hashed the same way so the check can compare them. */
+const TOKEN_COMPARE_SALT = Buffer.from("lexi-bearer-token-compare-v1", "utf8");
+
 export function tokensMatch(presented: string, expected: string): boolean {
-  const a = createHash("sha256").update(presented, "utf8").digest();
-  const b = createHash("sha256").update(expected, "utf8").digest();
+  const a = scryptSync(presented, TOKEN_COMPARE_SALT, 32);
+  const b = scryptSync(expected, TOKEN_COMPARE_SALT, 32);
   return timingSafeEqual(a, b);
 }
