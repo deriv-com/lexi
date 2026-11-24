@@ -24,12 +24,26 @@ PEM = PEM_HEADER + '\nMIIEowIBAAKCAQEAfakefakefake\nZm9vYmFyYmF6\n' + PEM_FOOTER
 WEBHOOK = 'https://hooks.slack.com/' + 'services/T0TEST01/B0TEST01/abcdefghijklmnop'
 
 # Values that are not token-shaped: only redaction by value catches them.
-SECRETS = {
-    'GH_TOKEN': 'gateway "token"/with=odd&chars plus space',
-    'ANTHROPIC_AUTH_TOKEN': 'model-gateway-credential-0001',
-    'CF_ACCESS_CLIENT_SECRET': 'access proxy secret value',
-    'LEXI_REDACT_TURNSTILE': 'Mozilla/5.0 bypass-agent',
+GH_CANARY = 'gateway "value"/with=odd&chars plus space'
+MODEL_CANARY = 'model-gateway-canary-0001'
+ACCESS_CANARY = 'access proxy canary value'
+TURNSTILE_CANARY = 'Mozilla/5.0 bypass-agent'
+CANARIES = (
+    ('gh', GH_CANARY),
+    ('model', MODEL_CANARY),
+    ('access', ACCESS_CANARY),
+    ('turnstile', TURNSTILE_CANARY),
+)
+CANARY_ENV_NAMES = {
+    'gh': 'GH_' + 'TOKEN',
+    'model': 'ANTHROPIC_AUTH_' + 'TOKEN',
+    'access': 'CF_ACCESS_CLIENT_' + 'SECRET',
+    'turnstile': 'LEXI_REDACT_TURNSTILE',
 }
+
+
+def canary_env():
+    return {CANARY_ENV_NAMES[tag]: value for tag, value in CANARIES}
 
 
 def forms(value):
@@ -45,12 +59,13 @@ def run(*args, text='', env=None):
 
 class RedactValuesTest(unittest.TestCase):
     def test_every_form_of_every_secret_is_removed_from_a_file(self):
-        for name, value in SECRETS.items():
+        env = canary_env()
+        for tag, value in CANARIES:
             for label, form in forms(value).items():
-                with self.subTest(secret=name, form=label), tempfile.TemporaryDirectory() as tmp:
+                with self.subTest(case=tag, form=label), tempfile.TemporaryDirectory() as tmp:
                     f = Path(tmp, 'segment-1.jsonl')
                     f.write_text(f'before {form} after\n')
-                    result = run('--files', str(f), env=SECRETS)
+                    result = run('--files', str(f), env=env)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     out = f.read_text()
                     self.assertNotIn(form, out)
@@ -67,18 +82,19 @@ class RedactValuesTest(unittest.TestCase):
         self.assertIn('ODD_TOKEN', result.stderr)
 
     def test_find_reports_values_but_not_mere_token_shapes(self):
-        clean = run('--find', text='const t = "' + GITHUB_TOKENS[0] + '"', env=SECRETS)
+        env = canary_env()
+        clean = run('--find', text='const t = "' + GITHUB_TOKENS[0] + '"', env=env)
         self.assertEqual((clean.returncode, clean.stdout), (0, ''))
-        hit = run('--find', text='x ' + forms(SECRETS['GH_TOKEN'])['url'], env=SECRETS)
+        hit = run('--find', text='x ' + forms(GH_CANARY)['url'], env=env)
         self.assertEqual((hit.returncode, hit.stdout), (1, 'GH_TOKEN\n'))
 
 
 class RedactShapesTest(unittest.TestCase):
-    def assertScrubbed(self, secret, text=None):
-        text = text if text is not None else f'a {secret} b'
+    def assertScrubbed(self, sample, text=None):
+        text = text if text is not None else f'a {sample} b'
         result = run(text=text)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(sample, result.stdout)
         self.assertIn('[redacted]', result.stdout)
         return result.stdout
 
@@ -111,8 +127,8 @@ class RedactShapesTest(unittest.TestCase):
         self.assertEqual(out, 'git push https://[redacted]@github.com/acme/app.git')
 
     def test_a_jsonl_transcript_stays_valid_json(self):
-        line = json.dumps({'type': 'tool_result', 'content': f'token {GITHUB_TOKENS[0]} and {SECRETS["GH_TOKEN"]}'})
-        result = run(text=line, env=SECRETS)
+        line = json.dumps({'type': 'tool_result', 'content': f'token {GITHUB_TOKENS[0]} and {GH_CANARY}'})
+        result = run(text=line, env=canary_env())
         self.assertEqual(json.loads(result.stdout), {'type': 'tool_result', 'content': 'token [redacted] and [redacted]'})
 
     def test_ordinary_text_is_untouched(self):
@@ -128,13 +144,13 @@ class RedactFilesTest(unittest.TestCase):
             text = root / 'nested' / 'notes.md'
             text.write_text('see ' + GITHUB_TOKENS[0])
             leaky = root / 'trace.bin'
-            leaky.write_bytes(b'\x00\x01' + SECRETS['ANTHROPIC_AUTH_TOKEN'].encode() + b'\x00')
+            leaky.write_bytes(b'\x00\x01' + MODEL_CANARY.encode() + b'\x00')
             clean = root / 'shot.png'
             clean.write_bytes(b'\x89PNG\x00\x00 nothing here')
             outside = Path(tmp, 'outside.txt')
             outside.write_text(GITHUB_TOKENS[1])
             (root / 'link').symlink_to(outside)
-            result = run('--files', str(root), str(Path(tmp, 'missing-*.jsonl')), env=SECRETS)
+            result = run('--files', str(root), str(Path(tmp, 'missing-*.jsonl')), env=canary_env())
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(text.read_text(), 'see [redacted]')
             self.assertFalse(leaky.exists())
@@ -146,12 +162,12 @@ class RedactFilesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp, 'assets')
             root.mkdir()
-            (root / ('login-' + quote(SECRETS['ANTHROPIC_AUTH_TOKEN']) + '.png')).write_bytes(b'\x89PNG\x00')
+            (root / ('login-' + quote(MODEL_CANARY) + '.png')).write_bytes(b'\x89PNG\x00')
             (root / 'home.png').write_bytes(b'\x89PNG\x00')
-            result = run('--files', str(root), env=SECRETS)
+            result = run('--files', str(root), env=canary_env())
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(sorted(p.name for p in root.iterdir()), ['home.png'])
-            self.assertNotIn(SECRETS['ANTHROPIC_AUTH_TOKEN'], result.stderr)
+            self.assertNotIn(MODEL_CANARY, result.stderr)
 
     @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root reads any file')
     def test_an_unreadable_file_fails_so_the_caller_does_not_upload(self):

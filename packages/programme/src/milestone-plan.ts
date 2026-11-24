@@ -76,10 +76,7 @@ export function screenSlug(state: string): string {
 }
 
 function slugify(state: string): string {
-  return state
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return (state.toLowerCase().match(/[a-z0-9]+/g) ?? []).join("-");
 }
 
 const isMobile = (platform: string): boolean => platform.includes("mobile");

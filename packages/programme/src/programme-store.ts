@@ -363,8 +363,12 @@ export interface ProgrammeSpecReader {
  */
 export function parseRenderedAcceptanceCriteria(body: string): Array<{ id: string; text: string }> {
   const criteria: Array<{ id: string; text: string }> = [];
-  for (const match of body.matchAll(/\*\*(AC-[0-9a-f]{8})\*\*\s*—\s*(.+)$/gm)) {
-    criteria.push({ id: match[1]!, text: match[2]!.trim() });
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    const match = /\*\*(AC-[0-9a-f]{8})\*\*[^\S\r\n]*—[^\S\r\n]*(\S[\s\S]*)$/.exec(line);
+    if (match) {
+      criteria.push({ id: match[1]!, text: match[2]! });
+    }
   }
   return criteria;
 }

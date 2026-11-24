@@ -65,6 +65,14 @@ export function describeReadPlatformRouting(registry: RepoRegistry): string {
   return `${parts.slice(0, -1).join(", ")} or ${parts[parts.length - 1]}`;
 }
 
+function stripTrailingSentencePunctuation(sentence: string): string {
+  let end = sentence.length;
+  while (end > 0 && (sentence[end - 1] === "." || /\s/.test(sentence[end - 1]!))) {
+    end -= 1;
+  }
+  return sentence.slice(0, end).trimStart();
+}
+
 /**
  * Builds the whole property. `sentence` is the tool-specific lead ("Which repo
  * to search", "Which product this bug affects") — the routing facts are
@@ -75,7 +83,7 @@ export function buildPlatformSchemaProperty(
   registry: RepoRegistry,
   sentence: string,
 ): PlatformSchemaProperty {
-  const trimmed = sentence.trim().replace(/[.\s]+$/, "");
+  const trimmed = stripTrailingSentencePunctuation(sentence);
   return {
     type: "string",
     enum: platformEnumValues(registry),
@@ -126,7 +134,7 @@ export function buildReadPlatformSchemaProperty(
   registry: RepoRegistry,
   sentence: string,
 ): PlatformSchemaProperty {
-  const trimmed = sentence.trim().replace(/[.\s]+$/, "");
+  const trimmed = stripTrailingSentencePunctuation(sentence);
   return {
     type: "string",
     enum: readPlatformEnumValues(registry),

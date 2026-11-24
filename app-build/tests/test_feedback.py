@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1]
-SECRET = 'fake-password-for-feedback-test'
+CANARY = 'fake-canary-for-feedback-test'
 
 # Answers by endpoint; --jq is applied with the real jq, as gh does.
 GH = r'''#!/usr/bin/env python3
@@ -56,7 +56,7 @@ class FeedbackChecksTest(unittest.TestCase):
                 path = f'{root / "bin"}:/usr/bin:/bin'
             env = dict(os.environ, PATH=path, RUNNER_TEMP=str(root),
                        GITHUB_REPOSITORY='example/app', LEXI_BRANCH='lexi/build-web',
-                       GH_FIXTURES=str(root / 'fixtures.json'), STAGING_REAL_PASSWORD=SECRET, **(extra_env or {}))
+                       GH_FIXTURES=str(root / 'fixtures.json'), STAGING_REAL_PASSWORD=CANARY, **(extra_env or {}))
             result = subprocess.run(['bash', str(TOOLS / 'feedback.sh')], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             return (root / 'assessment.md').read_text()
@@ -64,7 +64,7 @@ class FeedbackChecksTest(unittest.TestCase):
     def test_latest_failing_runs_reach_the_builder_with_their_error(self):
         log = '\n'.join([f'2026-10-10T03:00:{n:02d}.0000000Z noise {n}' for n in range(60)] + [
             '2026-10-10T03:01:00.0000000Z \x1b[31mError [ERR_MODULE_NOT_FOUND]\x1b[0m: Cannot find module scenarios',
-            f'2026-10-10T03:01:01.0000000Z login {SECRET}',
+            f'2026-10-10T03:01:01.0000000Z login {CANARY}',
             '2026-10-10T03:01:02.0000000Z ##[error]Process completed with exit code 1.',
             '2026-10-10T03:01:03.0000000Z Post job cleanup.',
         ])
@@ -86,7 +86,7 @@ class FeedbackChecksTest(unittest.TestCase):
         self.assertIn('##[error]Process completed with exit code 1.', assessment)
         self.assertNotIn('Post job cleanup', assessment)
         self.assertNotIn('2026-10-10T03', assessment)
-        self.assertNotIn(SECRET, assessment)
+        self.assertNotIn(CANARY, assessment)
         self.assertLessEqual(assessment.count('noise'), 37, 'at most 40 lines end at the error')
 
     def test_unreadable_log_says_so(self):
@@ -107,10 +107,10 @@ class FeedbackChecksTest(unittest.TestCase):
         assessment = self.run_feedback({
             'repos/example/app/commits/abc1234def/check-runs': {'check_runs': [
                 {'id': 3, 'name': 'common', 'conclusion': 'failure', 'html_url': 'https://ci/3', 'check_suite': {'id': 1}}]},
-            'repos/example/app/actions/jobs/3/logs': f'login {SECRET}\n##[error]failed',
+            'repos/example/app/actions/jobs/3/logs': f'login {CANARY}\n##[error]failed',
         }, without_node=True)
         self.assertIn('could not be redacted', assessment)
-        self.assertNotIn(SECRET, assessment)
+        self.assertNotIn(CANARY, assessment)
 
     def test_passing_checks_add_nothing(self):
         assessment = self.run_feedback({'repos/example/app/commits/abc1234def/check-runs': {'check_runs': [

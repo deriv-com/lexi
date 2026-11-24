@@ -64,7 +64,12 @@ const NEXT_APP_PAGE = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?app\/(?:(.+)\/)
 const NEXT_PAGES_FILE = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?pages\/(.+)\.(?:tsx|jsx|ts|js)$/;
 const ROUTER_DIR = /(?:^|\/)(?:routes|router|routing|navigation)\//;
 const SCREEN_DIR = /(?:^|\/)(?:screens|pages|views)\//;
-const FEATURE_SCREEN = /(?:^|\/)features\/.*(?:Screen|Page|_screen|_page)\.(?:tsx|jsx|ts|js|dart)$/;
+const FEATURE_DIR = /(?:^|\/)features\//;
+const FEATURE_SCREEN_FILE = /(?:Screen|Page|_screen|_page)\.(?:tsx|jsx|ts|js|dart)$/;
+
+function isFeatureScreenPath(path: string): boolean {
+  return FEATURE_DIR.test(path) && FEATURE_SCREEN_FILE.test(path);
+}
 
 function nextAppRoute(path: string): string | null {
   if (IGNORED_PATH.test(path)) return null;
@@ -104,18 +109,24 @@ export function isParityRoutePath(path: string): boolean {
 /** Files whose PATH alone marks them as screens or route declarations. */
 export function isParityScreenPath(path: string): boolean {
   if (!isParitySourcePath(path)) return false;
-  return isParityRoutePath(path) || ROUTER_DIR.test(path) || SCREEN_DIR.test(path) || FEATURE_SCREEN.test(path);
+  return isParityRoutePath(path) || ROUTER_DIR.test(path) || SCREEN_DIR.test(path) || isFeatureScreenPath(path);
 }
 
-const LOCALE_JSON =
-  /(?:^|\/)(?:locales?|i18n|translations|lang|languages)\/(?:.*\/)?en(?:[-_][A-Za-z]{2,4})?(?:\/[^/]+)?\.json$/;
+const LOCALE_DIR = /(?:^|\/)(?:locales?|i18n|translations|lang|languages)\//;
+const LOCALE_JSON_TAIL = /(?:^|\/)en(?:[-_][A-Za-z]{2,4})?(?:\/[^/]+)?\.json$/;
 const LOCALE_ARB = /(?:^|\/)[^/]*en(?:[-_][A-Za-z]{2,4})?\.arb$/;
+
+function isLocaleJsonPath(path: string): boolean {
+  const match = LOCALE_DIR.exec(path);
+  if (!match) return false;
+  return LOCALE_JSON_TAIL.test(path.slice(match.index + match[0].length));
+}
 
 // English locale files: any `locales/` or `i18n/` tree holding `en*.json`
 // (file or directory), or an `*en*.arb` bundle for Flutter.
 export function isParityLocalePath(path: string): boolean {
   if (IGNORED_PATH.test(path)) return false;
-  return LOCALE_JSON.test(path) || LOCALE_ARB.test(path);
+  return isLocaleJsonPath(path) || LOCALE_ARB.test(path);
 }
 
 const ENV_EXAMPLE = /(?:^|\/)\.env(?:\.[\w-]+)*\.(?:example|sample|template|dist)$/;
@@ -186,7 +197,7 @@ function baseName(path: string): string {
 }
 
 const DEFAULT_EXPORT =
-  /export\s+default\s+(?:async\s+)?(?:function\s+([A-Z]\w*)|(?:memo|observer|forwardRef)\(\s*([A-Z]\w*)|([A-Z]\w*)\s*;?\s*$)/m;
+  /export\s+default\s+(?:async\s+)?(?:function\s+([A-Z]\w*)|(?:memo|observer|forwardRef)\(\s*([A-Z]\w*)|([A-Z]\w*)[^\S\r\n]*(?:;[^\S\r\n]*)?$)/m;
 const DART_SCREEN_CLASS = /class\s+([A-Z]\w*(?:Screen|Page|View))\s+extends\s+/g;
 const GENERIC_COMPONENT_NAMES = new Set(["Page", "Layout", "Component", "Index", "Default", "App"]);
 
@@ -215,8 +226,8 @@ function routeFileScreenName(path: string, content: string | undefined): string 
 /* ------------------------------------------------------------------------ */
 
 const RR_PATH_LITERAL = /\bpath\s*[:=]\s*["'`]([^"'`\n]+)["'`]/g;
-const FLUTTER_GO_ROUTE = /(?:GoRoute|AutoRoute|MaterialPageRoute|PageRoute|Route)\(\s*(?:[^)]*?\b)?path\s*:\s*['"]([^'"]+)['"]/g;
-const FLUTTER_ROUTE_SETTINGS = /RouteSettings\(\s*(?:[^)]*?\b)?name\s*:\s*['"]([^'"]+)['"]/g;
+const FLUTTER_GO_ROUTE = /(?:GoRoute|AutoRoute|MaterialPageRoute|PageRoute|Route)\([^()]*?\bpath\s*:\s*['"]([^'"]+)['"]/g;
+const FLUTTER_ROUTE_SETTINGS = /RouteSettings\([^()]*?\bname\s*:\s*['"]([^'"]+)['"]/g;
 const FLUTTER_NAMED_ROUTE = /(?:initialRoute|pushNamed|pushReplacementNamed|pushNamedAndRemoveUntil)\s*[:(]\s*(?:context\s*,\s*)?['"](\/[^'"]*)['"]/g;
 const FLUTTER_ROUTES_MAP_KEY = /['"](\/[^'"\n]*)['"]\s*:\s*\(/g;
 
@@ -270,7 +281,7 @@ function scanFeatures(content: string, out: Set<string>): void {
 }
 
 const ANALYTICS_CALLS = /\b(?:track|trackEvent|logEvent|sendEvent|recordEvent|trackAction)\(\s*['"`]([^'"`\n]+)['"`]/g;
-const ANALYTICS_NAMED = /\b(?:logEvent|trackEvent|track)\(\s*(?:[^)]*?,\s*)?name\s*:\s*['"]([^'"\n]+)['"]/g;
+const ANALYTICS_NAMED = /\b(?:logEvent|trackEvent|track)\([^()]*?\bname\s*:\s*['"]([^'"\n]+)['"]/g;
 
 function scanAnalytics(content: string, out: Set<string>): void {
   collect(ANALYTICS_CALLS, content, out);
@@ -414,7 +425,7 @@ export function extractParityInventory(input: ParityInventoryInput): ParityInven
       isParitySourcePath(path) &&
       // `_app`, `_document`, `api/*` live in the pages router but are not screens.
       !NEXT_PAGES_FILE.test(path) &&
-      (SCREEN_DIR.test(path) || FEATURE_SCREEN.test(path))
+      (SCREEN_DIR.test(path) || isFeatureScreenPath(path))
     ) {
       const base = baseName(path);
       if (!/^index$/i.test(base)) screens.add(pascalCase(base));

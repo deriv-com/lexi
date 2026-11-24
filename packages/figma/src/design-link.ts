@@ -24,6 +24,15 @@ const MAX_RAW_LENGTH = 2048;
 const FILE_KEY_RE = /^[A-Za-z0-9]{10,128}$/;
 const NODE_ID_RE = /^\d+[:-]\d+$/;
 const PATH_RE = /^\/(design|file|proto)\/([A-Za-z0-9]{10,128})(?:\/|$)/;
+const TRAILING_URL_PUNCTUATION = new Set([">", ",", ")", "]", ".", "'", '"']);
+
+function stripTrailingUrlPunctuation(value: string): string {
+  let end = value.length;
+  while (end > 0 && (TRAILING_URL_PUNCTUATION.has(value[end - 1]!) || /\s/.test(value[end - 1]!))) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
 
 /**
  * Unwrap Slack link markup and pull the first embeddable Figma URL from a
@@ -52,7 +61,7 @@ export function extractFigmaDesignUrlCandidate(raw: string): string {
   const embedded =
     /https:\/\/(?:www\.)?figma\.com\/(?:design|file|proto)\/[A-Za-z0-9][^\s<>"']*/i.exec(trimmed);
   if (embedded?.[0]) {
-    return embedded[0].replace(/[>,)\].'"\s]+$/g, "");
+    return stripTrailingUrlPunctuation(embedded[0]);
   }
   return trimmed;
 }
