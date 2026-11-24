@@ -20,6 +20,18 @@ export type FigmaDesignLinkParseResult =
   | { ok: true; link: ParsedFigmaDesignLink }
   | { ok: false; reason: string };
 
+const TRAILING_URL_JUNK = new Set([">", ",", ")", "]", ".", "'", '"']);
+
+function stripTrailingUrlJunk(value: string): string {
+  let end = value.length;
+  while (end > 0) {
+    const ch = value[end - 1]!;
+    if (TRAILING_URL_JUNK.has(ch) || ch.trim() === "") end -= 1;
+    else break;
+  }
+  return value.slice(0, end);
+}
+
 const MAX_RAW_LENGTH = 2048;
 const FILE_KEY_RE = /^[A-Za-z0-9]{10,128}$/;
 const NODE_ID_RE = /^\d+[:-]\d+$/;
@@ -52,7 +64,7 @@ export function extractFigmaDesignUrlCandidate(raw: string): string {
   const embedded =
     /https:\/\/(?:www\.)?figma\.com\/(?:design|file|proto)\/[A-Za-z0-9][^\s<>"']*/i.exec(trimmed);
   if (embedded?.[0]) {
-    return embedded[0].replace(/[>,)\].'"\s]+$/g, "");
+    return stripTrailingUrlJunk(embedded[0]);
   }
   return trimmed;
 }

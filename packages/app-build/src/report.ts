@@ -115,7 +115,7 @@ function markerAttributes(body: string, name: string): Record<string, string> {
   const match = body.match(new RegExp(`<!--\\s*app-build:${name}\\b([^>]*?)-->`));
   if (!match) return {};
   const attributes: Record<string, string> = {};
-  for (const pair of match[1].matchAll(/([a-z_]+)=([^\s]+)/gi)) {
+  for (const pair of match[1].matchAll(/(?<![A-Za-z_])([A-Za-z_]+)=([^\s]+)/g)) {
     attributes[pair[1].toLowerCase()] = pair[2];
   }
   return attributes;
@@ -129,7 +129,7 @@ function positiveInt(value: string | undefined): number | null {
 
 function appFrom(value: string | undefined, body: string): AppBuildApp | null {
   if (isAppBuildApp(value)) return value;
-  const heading = body.match(/^##\s+Session\s+\d+\s+[—-]\s+(.+)$/m)?.[1] ?? "";
+  const heading = body.match(/^##[ \t]+Session[ \t]+\d+[ \t]+[—-][ \t]+(\S.*)$/m)?.[1] ?? "";
   if (/\bmobile\b/i.test(heading)) return "mobile";
   if (/\bweb\b/i.test(heading)) return "web";
   return null;
@@ -193,8 +193,56 @@ function countChecks(lines: string[]): ParsedCheckCounts {
   return counts;
 }
 
+function hasSpaceOrParen(value: string): boolean {
+  for (const ch of value) {
+    if (ch === ")" || ch.trim() === "") return true;
+  }
+  return false;
+}
+
 function firstRunUrl(body: string): string | null {
-  return body.match(/https:\/\/github\.com\/[^\s)]+\/actions\/runs\/\d+/)?.[0] ?? null;
+  const prefix = "https://github.com/";
+  const marker = "/actions/runs/";
+  let from = 0;
+  while (from < body.length) {
+    const at = body.indexOf(prefix, from);
+    if (at < 0) return null;
+    let search = at + prefix.length;
+    while (search < body.length) {
+      const rel = body.indexOf(marker, search);
+      if (rel < 0) break;
+      if (hasSpaceOrParen(body.slice(at + prefix.length, rel))) break;
+      let end = rel + marker.length;
+      const digit = end < body.length ? body[end]! : "";
+      if (digit >= "0" && digit <= "9") {
+        while (end < body.length && body[end]! >= "0" && body[end]! <= "9") end += 1;
+        return body.slice(at, end);
+      }
+      search = rel + marker.length;
+    }
+    from = at + prefix.length;
+  }
+  return null;
+}
+
+function buildLoopStopReason(body: string): string | null {
+  const marker = "_The build loop stopped:";
+  let from = 0;
+  while (from < body.length) {
+    const at = body.indexOf(marker, from);
+    if (at < 0) return null;
+    const lineEnd = body.indexOf("\n", at);
+    const end = lineEnd < 0 ? body.length : lineEnd;
+    let line = body.slice(at + marker.length, end).replace(/\r$/, "").trimEnd();
+    if (line.endsWith("_")) {
+      line = line.slice(0, -1);
+      if (line.endsWith(".")) line = line.slice(0, -1);
+      const text = line.trim();
+      if (text.length > 0) return text;
+    }
+    from = at + marker.length;
+  }
+  return null;
 }
 
 export function parseSessionReport(body: string): ParsedSessionReport {
@@ -236,7 +284,7 @@ export function parseSessionReport(body: string): ParsedSessionReport {
     if (summaryLines.length >= 3) break;
   }
 
-  const stopReason = body.match(/_The build loop stopped:\s*(.+?)\.?_\s*$/m)?.[1]?.trim() ?? null;
+  const stopReason = buildLoopStopReason(body);
 
   return {
     kind: "report",
@@ -296,7 +344,7 @@ export function runApp(run: { displayTitle?: string | null; name?: string | null
 
 /** `max_sessions` named in a run title (`max 12`, `of 12`, `max_sessions=12`). */
 export function runMaxSessions(run: { displayTitle?: string | null }): number | null {
-  const match = (run.displayTitle ?? "").match(/\b(?:max(?:_sessions)?\s*[=:]?\s*|of\s+)(\d+)\b/i);
+  const match = (run.displayTitle ?? "").match(/\b(?:max(?:_sessions)?(?:\s*[=:]\s*|\s+)?|of\s+)(\d+)\b/i);
   return match ? positiveInt(match[1]) : null;
 }
 

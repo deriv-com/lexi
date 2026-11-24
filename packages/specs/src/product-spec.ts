@@ -60,8 +60,8 @@ export interface ProductSpecDocument {
   problems: string[];
 }
 
-const DOMAIN_HEADING = /^###\s+(D\d+)\s+[—–-]+\s+(.+?)\s*$/;
-const SUBSECTION_HEADING = /^####\s+(.+?)\s*$/;
+const DOMAIN_HEADING = /^###[ \t]+(D\d+)[ \t]+[—–-]+[ \t]+(\S(?:.*\S)?)$/;
+const SUBSECTION_HEADING = /^####[ \t]+(\S(?:.*\S)?)$/;
 const ANY_HEADING = /^#{1,3}\s/;
 const STRUCK = /~~/;
 
@@ -194,7 +194,7 @@ export function parseProductSpec(markdown: string): ProductSpecDocument {
           }
           break;
         }
-        const bold = line.match(/^\*\*(.+?)\*\*\s*(.*)$/);
+        const bold = line.match(/^\*\*(.+?)\*\*(?:[ \t]+(\S(?:.*\S)?))?$/);
         if (bold) {
           behaviourTitle = cleanInline(bold[1]!).replace(/[.:]\s*$/, "");
           const rest = cleanInline(bold[2] ?? "");
@@ -232,7 +232,7 @@ export function parseProductSpec(markdown: string): ProductSpecDocument {
         break;
       }
       case section === "error behaviour": {
-        const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+        const bullet = line.match(/^[ \t]*[-*][ \t]+(\S.*)$/);
         if (bullet) domain.criterionTexts.push(`Error behaviour: ${cleanInline(bullet[1]!)}`);
         break;
       }

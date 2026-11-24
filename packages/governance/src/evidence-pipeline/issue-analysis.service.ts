@@ -287,6 +287,17 @@ function isCompleteness(v: unknown): v is "complete" | "partial" | "minimal" {
  * Heuristic analysis when LLM is unavailable.
  * Uses title patterns, labels, and body length to produce a conservative result.
  */
+/** True when one line contains `left` and later `right`. `.` in a regex would not cross newlines either. */
+function sameLineInOrder(text: string, pairs: ReadonlyArray<readonly [string, string]>): boolean {
+  const lines = text.toLowerCase().split("\n");
+  return pairs.some(([left, right]) =>
+    lines.some((line) => {
+      const at = line.indexOf(left);
+      return at >= 0 && line.indexOf(right, at + left.length) >= 0;
+    }),
+  );
+}
+
 function deterministicAnalysis(input: IssueAnalysisInput): IssueAnalysis {
   const titleLower = input.title.toLowerCase();
   const bodyLower = (input.body ?? "").toLowerCase();
@@ -308,7 +319,7 @@ function deterministicAnalysis(input: IssueAnalysisInput): IssueAnalysis {
   // Evidence quality from body
   let evidenceQuality: "strong" | "medium" | "weak" = "weak";
   if (input.body && input.body.length > 500) evidenceQuality = "medium";
-  if (input.body && input.body.length > 1000 && /steps.*reproduce|expected.*actual/i.test(input.body)) {
+  if (input.body && input.body.length > 1000 && sameLineInOrder(input.body, [["steps", "reproduce"], ["expected", "actual"]])) {
     evidenceQuality = "strong";
   }
 

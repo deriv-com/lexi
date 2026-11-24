@@ -19,7 +19,7 @@ export function composePullRequestBody(body: string, template: string | null): s
   const trimmedBody = body.trim();
   if (!template) return trimmedBody;
 
-  const headings = [...template.matchAll(/^##\s+.+$/gm)];
+  const headings = [...template.matchAll(/^##[ \t]+\S.*$/gm)];
   if (headings.length === 0) return trimmedBody;
 
   const firstHeading = headings[0][0].trim();

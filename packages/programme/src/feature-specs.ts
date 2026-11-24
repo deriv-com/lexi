@@ -24,7 +24,7 @@ const INDEX_NAMES = new Set(["readme", "index", "_index", "overview"]);
 function tokens(value: string): string[] {
   return value
     .toLowerCase()
-    .replace(/\[[^\]]*\]/g, " ") // dynamic segments: [id], [...slug]
+    .replace(/\[[^[\]]*\]/g, " ") // dynamic segments: [id], [...slug]
     .split(/[^a-z0-9]+/)
     .filter((token) => token.length > 0 && !/^\d+$/.test(token));
 }

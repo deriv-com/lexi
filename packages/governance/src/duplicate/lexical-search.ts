@@ -25,7 +25,7 @@ function tokenize(text: string): string[] {
 
 function extractSignatures(text: string): string[] {
   const signatures: string[] = [];
-  const errorPatterns = text.match(/[A-Z][A-Za-z]+Error|ERR_[A-Z0-9_]+|failed to fetch/gi) ?? [];
+  const errorPatterns = text.match(/(?<![A-Za-z])[A-Z][A-Za-z]+Error|(?<![A-Z0-9_])ERR_[A-Z0-9_]+|failed to fetch/gi) ?? [];
   const urls = text.match(/https?:\/\/[^\s)]+/g) ?? [];
   const routes = text.match(/\/[a-z0-9][a-z0-9/_-]*/gi) ?? [];
   signatures.push(...errorPatterns, ...urls.slice(0, 5), ...routes.slice(0, 10));

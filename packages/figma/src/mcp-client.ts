@@ -55,9 +55,11 @@ export function parseMcpHttpBody(body: string): unknown {
   }
   const payloads: unknown[] = [];
   for (const line of trimmed.split("\n")) {
-    const match = /^data:\s*(.+)$/.exec(line.trim());
-    if (!match) continue;
-    const data = match[1]!.trim();
+    const trimmedLine = line.trim();
+    if (!trimmedLine.startsWith("data:")) continue;
+    const rest = trimmedLine.slice("data:".length);
+    if (rest.length === 0) continue;
+    const data = rest.trim();
     if (data === "[DONE]") continue;
     payloads.push(JSON.parse(data) as unknown);
   }
@@ -803,10 +805,10 @@ export function parseFigmaPlans(text: string, raw?: unknown): FigmaPlan[] {
   } catch {
     // whoami may be prose wrapping a JSON object
   }
-  const embedded = /\{[\s\S]*"plans"\s*:\s*\[[\s\S]*\][\s\S]*\}/.exec(text);
+  const embedded = embeddedPlansObject(text);
   if (embedded) {
     try {
-      const fromEmbedded = plansFromUnknown(JSON.parse(embedded[0]));
+      const fromEmbedded = plansFromUnknown(JSON.parse(embedded));
       if (fromEmbedded.length > 0) return fromEmbedded;
     } catch {
       // fall through
@@ -902,11 +904,204 @@ export function isUnusableProtoStart(id: string, context?: string): boolean {
   return false;
 }
 
+function isSpaceChar(ch: string | undefined): boolean {
+  return ch !== undefined && ch.trim() === "";
+}
+
+/** A `12:34` / `12-34` id starting at `index`, not a slice of a longer digit run. */
+function readNodeIdAt(text: string, index: number): { id: string; end: number } | null {
+  if (index > 0) {
+    const prev = text[index - 1]!;
+    if (prev >= "0" && prev <= "9") return null;
+  }
+  let i = index;
+  if (i >= text.length || text[i]! < "0" || text[i]! > "9") return null;
+  const start = i;
+  while (i < text.length && text[i]! >= "0" && text[i]! <= "9") i += 1;
+  if (text[i] !== ":" && text[i] !== "-") return null;
+  i += 1;
+  if (i >= text.length || text[i]! < "0" || text[i]! > "9") return null;
+  while (i < text.length && text[i]! >= "0" && text[i]! <= "9") i += 1;
+  return { id: text.slice(start, i), end: i };
+}
+
+function findNodeId(text: string, from = 0): { id: string; start: number } | null {
+  for (let i = from; i < text.length; i += 1) {
+    const found = readNodeIdAt(text, i);
+    if (found) return { id: found.id, start: i };
+  }
+  return null;
+}
+
+function pageListingIdOnLine(line: string): string | null {
+  let i = 0;
+  while (isSpaceChar(line[i])) i += 1;
+  if (line[i] !== "-") return null;
+  i += 1;
+  while (isSpaceChar(line[i])) i += 1;
+  const id = readNodeIdAt(line, i);
+  if (!id) return null;
+  let j = id.end;
+  while (isSpaceChar(line[j])) j += 1;
+  return line[j] === ":" ? id.id : null;
+}
+
+function quotedAttributeNodeId(attrs: string): string | null {
+  const lower = attrs.toLowerCase();
+  let bestAt = Number.POSITIVE_INFINITY;
+  let best: string | null = null;
+  for (const key of ["node-id", "nodeid", "id"]) {
+    let from = 0;
+    while (from < lower.length) {
+      const at = lower.indexOf(key, from);
+      if (at < 0) break;
+      if (key === "id") {
+        const prev = lower[at - 1];
+        if (prev && ((prev >= "a" && prev <= "z") || prev === "-")) {
+          from = at + 1;
+          continue;
+        }
+      }
+      if (attrs[at + key.length] !== "=") {
+        from = at + key.length;
+        continue;
+      }
+      const quote = attrs[at + key.length + 1];
+      if (quote !== '"' && quote !== "'") {
+        from = at + key.length;
+        continue;
+      }
+      const valueStart = at + key.length + 2;
+      const valueEnd = attrs.indexOf(quote, valueStart);
+      if (valueEnd < 0) break;
+      const value = attrs.slice(valueStart, valueEnd);
+      const id = readNodeIdAt(value, 0);
+      if (id && id.end === value.length && at < bestAt) {
+        bestAt = at;
+        best = id.id;
+      }
+      break;
+    }
+  }
+  return best;
+}
+
+function canvasOrPageTagId(text: string): string | null {
+  const lower = text.toLowerCase();
+  let from = 0;
+  while (from < lower.length) {
+    const canvasAt = lower.indexOf("<canvas", from);
+    const pageAt = lower.indexOf("<page", from);
+    let at = -1;
+    let width = 0;
+    if (canvasAt >= 0 && (pageAt < 0 || canvasAt < pageAt)) {
+      at = canvasAt;
+      width = "<canvas".length;
+    } else if (pageAt >= 0) {
+      at = pageAt;
+      width = "<page".length;
+    } else return null;
+    const boundary = lower[at + width];
+    if (boundary && boundary >= "a" && boundary <= "z") {
+      from = at + width;
+      continue;
+    }
+    const close = text.indexOf(">", at);
+    if (close < 0) return null;
+    const id = quotedAttributeNodeId(text.slice(at, close));
+    if (id) return id;
+    from = close + 1;
+  }
+  return null;
+}
+
+function namedPageOrCoverId(text: string): string | null {
+  let from = 0;
+  while (from < text.length) {
+    const found = findNodeId(text, from);
+    if (!found) return null;
+    const located = readNodeIdAt(text, found.start);
+    if (!located) return null;
+    let j = located.end;
+    while (isSpaceChar(text[j])) j += 1;
+    if (text[j] !== ":") {
+      from = found.start + 1;
+      continue;
+    }
+    j += 1;
+    while (isSpaceChar(text[j])) j += 1;
+    const rest = text.slice(j);
+    if (/^(?:Page|Cover)\b/i.test(rest)) return found.id;
+    from = found.start + 1;
+  }
+  return null;
+}
+
+function embeddedPlansObject(text: string): string | null {
+  let from = 0;
+  while (from < text.length) {
+    const keyAt = text.indexOf('"plans"', from);
+    if (keyAt < 0) return null;
+    let i = keyAt + '"plans"'.length;
+    while (isSpaceChar(text[i])) i += 1;
+    if (text[i] !== ":") {
+      from = keyAt + 1;
+      continue;
+    }
+    i += 1;
+    while (isSpaceChar(text[i])) i += 1;
+    if (text[i] !== "[") {
+      from = keyAt + 1;
+      continue;
+    }
+    let depth = 0;
+    let start = -1;
+    for (let j = keyAt; j >= 0; j -= 1) {
+      const ch = text[j]!;
+      if (ch === "}") depth += 1;
+      else if (ch === "{") {
+        if (depth === 0) {
+          start = j;
+          break;
+        }
+        depth -= 1;
+      }
+    }
+    if (start < 0) {
+      from = keyAt + 1;
+      continue;
+    }
+    depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let j = start; j < text.length; j += 1) {
+      const ch = text[j]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) return text.slice(start, j + 1);
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
 function looksLikePageListing(text: string): boolean {
   if (/<frame\b/i.test(text)) return false;
   if (/"startingNodeId"\s*:/.test(text)) return false;
   if (/Top-level pages/i.test(text)) return true;
-  return /(?:^|\n)\s*-\s*\d+[:-]\d+\s*:/m.test(text);
+  return text.split("\n").some((line) => pageListingIdOnLine(line) !== null);
 }
 
 /**
@@ -914,12 +1109,14 @@ function looksLikePageListing(text: string): boolean {
  * Never use this as `starting-point-node-id`.
  */
 export function extractCanvasPageId(text: string): string | undefined {
-  const line = /(?:^|\n)\s*-\s*(\d+[:-]\d+)\s*:/.exec(text);
-  if (line?.[1]) return normalizeFigmaNodeId(line[1]);
-  const canvas = /<(?:canvas|page)[^>]*(?:id|node-id)=["'](\d+[:-]\d+)["']/i.exec(text);
-  if (canvas?.[1]) return normalizeFigmaNodeId(canvas[1]);
-  const named = /(\d+[:-]\d+)\s*:\s*(?:Page|Cover)\b/i.exec(text);
-  if (named?.[1]) return normalizeFigmaNodeId(named[1]);
+  for (const line of text.split("\n")) {
+    const id = pageListingIdOnLine(line);
+    if (id) return normalizeFigmaNodeId(id);
+  }
+  const canvas = canvasOrPageTagId(text);
+  if (canvas) return normalizeFigmaNodeId(canvas);
+  const named = namedPageOrCoverId(text);
+  if (named) return normalizeFigmaNodeId(named);
   return undefined;
 }
 
@@ -1038,7 +1235,6 @@ export function extractStartingNodeId(text: string, preferredFrameName?: string)
   }
   if (looksLikePageListing(text)) return undefined;
 
-  const idPattern = /(\d+[:-]\d+)/;
   if (preferredFrameName && preferredFrameName.length > 0) {
     const escaped = preferredFrameName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const named = new RegExp(
@@ -1047,14 +1243,14 @@ export function extractStartingNodeId(text: string, preferredFrameName?: string)
     );
     const namedMatch = named.exec(text);
     const candidate = namedMatch?.[1] ?? namedMatch?.[2];
-    if (candidate && idPattern.test(candidate) && !isUnusableProtoStart(candidate, text)) {
+    if (candidate && findNodeId(candidate) && !isUnusableProtoStart(candidate, text)) {
       return normalizeFigmaNodeId(candidate);
     }
   }
   const attr = /(?:id|node-id|nodeId)=["'](\d+[:-]\d+)["']/.exec(text);
   if (attr?.[1] && !isUnusableProtoStart(attr[1], text)) return normalizeFigmaNodeId(attr[1]);
-  const loose = idPattern.exec(text);
-  if (loose?.[1] && !isUnusableProtoStart(loose[1], text)) return normalizeFigmaNodeId(loose[1]);
+  const loose = findNodeId(text);
+  if (loose && !isUnusableProtoStart(loose.id, text)) return normalizeFigmaNodeId(loose.id);
   return undefined;
 }
 

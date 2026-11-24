@@ -134,6 +134,16 @@ function classifySource(
   return "unknown";
 }
 
+function expectationLanguage(body: string): boolean {
+  const lines = body.toLowerCase().split("\n");
+  const ordered = (left: string, right: string): boolean =>
+    lines.some((line) => {
+      const at = line.indexOf(left);
+      return at >= 0 && line.indexOf(right, at + left.length) >= 0;
+    });
+  return ordered("expected", "actual") || ordered("actual", "expected") || ordered("should", "but") || lines.some((line) => line.includes("instead"));
+}
+
 function assessEvidenceStrength(
   body: string | null,
   labels: string[],
@@ -147,7 +157,7 @@ function assessEvidenceStrength(
   const bodyLower = body.toLowerCase();
   if (/screenshot|image|video|recording|screen capture/i.test(body)) score += 0.15;
   if (/steps to reproduce|how to reproduce|reproduction steps/i.test(body)) score += 0.15;
-  if (/expected.*actual|actual.*expected|should.*but|instead/i.test(body)) score += 0.1;
+  if (expectationLanguage(body)) score += 0.1;
   if (/error|exception|stack trace|traceback|console/i.test(body)) score += 0.1;
   if (/version|browser|os|device|environment/i.test(body)) score += 0.05;
 

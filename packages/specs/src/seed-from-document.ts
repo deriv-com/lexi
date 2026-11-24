@@ -46,7 +46,7 @@ export function splitSections(markdown: string): DocumentSection[] {
   const lines = markdown.split("\n");
   let current: DocumentSection | null = null;
   for (const line of lines) {
-    const heading = line.match(/^#{2,3}\s+(.+)$/);
+    const heading = line.match(/^#{2,3}[ \t]+(\S.*)$/);
     if (heading) {
       if (current) sections.push(current);
       current = { heading: heading[1].trim(), body: "" };

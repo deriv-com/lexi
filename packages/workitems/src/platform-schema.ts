@@ -20,6 +20,17 @@ export interface PlatformSchemaProperty {
   description: string;
 }
 
+/** Drops a trailing run of dots and whitespace without a backtracking expression. */
+function stripTrailingDotsAndSpace(value: string): string {
+  let end = value.length;
+  while (end > 0) {
+    const ch = value[end - 1]!;
+    if (ch === "." || ch.trim() === "") end -= 1;
+    else break;
+  }
+  return value.slice(0, end);
+}
+
 /**
  * The platform values a code-dispatch tool may offer: every non-placeholder
  * repo that declares a platform *and* holds the `code` role. A platform whose
@@ -75,7 +86,7 @@ export function buildPlatformSchemaProperty(
   registry: RepoRegistry,
   sentence: string,
 ): PlatformSchemaProperty {
-  const trimmed = sentence.trim().replace(/[.\s]+$/, "");
+  const trimmed = stripTrailingDotsAndSpace(sentence.trim());
   return {
     type: "string",
     enum: platformEnumValues(registry),
@@ -126,7 +137,7 @@ export function buildReadPlatformSchemaProperty(
   registry: RepoRegistry,
   sentence: string,
 ): PlatformSchemaProperty {
-  const trimmed = sentence.trim().replace(/[.\s]+$/, "");
+  const trimmed = stripTrailingDotsAndSpace(sentence.trim());
   return {
     type: "string",
     enum: readPlatformEnumValues(registry),

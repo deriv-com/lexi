@@ -308,7 +308,7 @@ function getOrCreate(
 
 function extractSignatures(text: string): string[] {
   const signatures: string[] = [];
-  const errorPatterns = text.match(/[A-Z][A-Za-z]+Error|ERR_[A-Z0-9_]+|ENOENT|EACCES|ETIMEDOUT/g) ?? [];
+  const errorPatterns = text.match(/(?<![A-Za-z])[A-Z][A-Za-z]+Error|(?<![A-Z0-9_])ERR_[A-Z0-9_]+|ENOENT|EACCES|ETIMEDOUT/g) ?? [];
   const httpErrors = text.match(/(?:status|HTTP|response)\s*(?:code\s*)?(\d{3})/gi) ?? [];
   signatures.push(...errorPatterns, ...httpErrors);
   return [...new Set(signatures)];

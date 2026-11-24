@@ -79,7 +79,7 @@ function slugify(state: string): string {
   return state
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/^-+|(?<!-)-+$/g, "");
 }
 
 const isMobile = (platform: string): boolean => platform.includes("mobile");

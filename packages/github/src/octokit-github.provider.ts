@@ -1756,7 +1756,7 @@ export class OctokitGithubProvider implements GitHubProvider {
    */
   async getTree(owner: string, repo: string, path?: string, ref?: string): Promise<GithubTreeResult> {
     const empty: GithubTreeResult = { entries: [], truncated: false };
-    const normalised = (path ?? "").replace(/^\/+|\/+$/g, "");
+    const normalised = stripEdgeSlashes(path ?? "");
     const client = await this.getClientForRepo(owner, repo);
 
     try {
@@ -2598,4 +2598,13 @@ async function readIssueHtml(
   }
   const joined = parts.join("\n").trim();
   return joined || null;
+}
+
+/** Leading and trailing `/` only. A run of slashes is walked once, not re-scanned. */
+function stripEdgeSlashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === "/") start += 1;
+  while (end > start && value[end - 1] === "/") end -= 1;
+  return value.slice(start, end);
 }

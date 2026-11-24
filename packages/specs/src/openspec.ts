@@ -67,12 +67,12 @@ export interface OpenSpecDocument {
   readonly problems: readonly string[];
 }
 
-const TITLE = /^#\s+(.+?)\s+Specification\s*$/;
-const H2 = /^##\s+(.+?)\s*$/;
-const REQUIREMENT = /^###\s+Requirement:\s*(.+?)\s*$/;
-const SCENARIO = /^####\s+Scenario:\s*(.+?)\s*$/;
-const WHEN = /^-\s+\*\*WHEN\*\*\s+(.+?)\s*$/;
-const THEN = /^-\s+\*\*THEN\*\*\s+(.+?)\s*$/;
+const TITLE = /^#[ \t]+(\S(?:.*\S)?)[ \t]+Specification[ \t]*$/;
+const H2 = /^##[ \t]+(\S(?:.*\S)?)$/;
+const REQUIREMENT = /^###[ \t]+Requirement:[ \t]*(\S(?:.*\S)?)$/;
+const SCENARIO = /^####[ \t]+Scenario:[ \t]*(\S(?:.*\S)?)$/;
+const WHEN = /^-[ \t]+\*\*WHEN\*\*[ \t]+(\S(?:.*\S)?)$/;
+const THEN = /^-[ \t]+\*\*THEN\*\*[ \t]+(\S(?:.*\S)?)$/;
 /** Any heading, used to detect where a block ends. */
 const ANY_HEADING = /^#{1,6}\s/;
 

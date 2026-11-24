@@ -64,7 +64,7 @@ const NEXT_APP_PAGE = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?app\/(?:(.+)\/)
 const NEXT_PAGES_FILE = /^(?:(?:apps|packages)\/[^/]+\/)?(?:src\/)?pages\/(.+)\.(?:tsx|jsx|ts|js)$/;
 const ROUTER_DIR = /(?:^|\/)(?:routes|router|routing|navigation)\//;
 const SCREEN_DIR = /(?:^|\/)(?:screens|pages|views)\//;
-const FEATURE_SCREEN = /(?:^|\/)features\/.*(?:Screen|Page|_screen|_page)\.(?:tsx|jsx|ts|js|dart)$/;
+const FEATURE_SCREEN = /(?:^|\/)features\/(?:[^/]+\/)*[^/]*(?:Screen|Page|_screen|_page)\.(?:tsx|jsx|ts|js|dart)$/;
 
 function nextAppRoute(path: string): string | null {
   if (IGNORED_PATH.test(path)) return null;
@@ -108,7 +108,7 @@ export function isParityScreenPath(path: string): boolean {
 }
 
 const LOCALE_JSON =
-  /(?:^|\/)(?:locales?|i18n|translations|lang|languages)\/(?:.*\/)?en(?:[-_][A-Za-z]{2,4})?(?:\/[^/]+)?\.json$/;
+  /(?:^|\/)(?:locales?|i18n|translations|lang|languages)\/(?:[^/]+\/)*en(?:[-_][A-Za-z]{2,4})?(?:\/[^/]+)?\.json$/;
 const LOCALE_ARB = /(?:^|\/)[^/]*en(?:[-_][A-Za-z]{2,4})?\.arb$/;
 
 // English locale files: any `locales/` or `i18n/` tree holding `en*.json`
@@ -186,7 +186,7 @@ function baseName(path: string): string {
 }
 
 const DEFAULT_EXPORT =
-  /export\s+default\s+(?:async\s+)?(?:function\s+([A-Z]\w*)|(?:memo|observer|forwardRef)\(\s*([A-Z]\w*)|([A-Z]\w*)\s*;?\s*$)/m;
+  /export\s+default\s+(?:async\s+)?(?:function\s+([A-Z]\w*)|(?:memo|observer|forwardRef)\(\s*([A-Z]\w*)|([A-Z]\w*)[ \t]*(?:;[ \t]*)?$)/m;
 const DART_SCREEN_CLASS = /class\s+([A-Z]\w*(?:Screen|Page|View))\s+extends\s+/g;
 const GENERIC_COMPONENT_NAMES = new Set(["Page", "Layout", "Component", "Index", "Default", "App"]);
 
@@ -215,8 +215,8 @@ function routeFileScreenName(path: string, content: string | undefined): string 
 /* ------------------------------------------------------------------------ */
 
 const RR_PATH_LITERAL = /\bpath\s*[:=]\s*["'`]([^"'`\n]+)["'`]/g;
-const FLUTTER_GO_ROUTE = /(?:GoRoute|AutoRoute|MaterialPageRoute|PageRoute|Route)\(\s*(?:[^)]*?\b)?path\s*:\s*['"]([^'"]+)['"]/g;
-const FLUTTER_ROUTE_SETTINGS = /RouteSettings\(\s*(?:[^)]*?\b)?name\s*:\s*['"]([^'"]+)['"]/g;
+const FLUTTER_GO_ROUTE = /(?:GoRoute|AutoRoute|MaterialPageRoute|PageRoute|Route)\((?:[^)]*?\b)?path\s*:\s*['"]([^'"]+)['"]/g;
+const FLUTTER_ROUTE_SETTINGS = /RouteSettings\((?:[^)]*?\b)?name\s*:\s*['"]([^'"]+)['"]/g;
 const FLUTTER_NAMED_ROUTE = /(?:initialRoute|pushNamed|pushReplacementNamed|pushNamedAndRemoveUntil)\s*[:(]\s*(?:context\s*,\s*)?['"](\/[^'"]*)['"]/g;
 const FLUTTER_ROUTES_MAP_KEY = /['"](\/[^'"\n]*)['"]\s*:\s*\(/g;
 
