@@ -424,21 +424,84 @@ function refuse(text: string): AppBuildOutcome {
  * relay decides what to repeat from those markers; a spoofed one would hide
  * real feedback or fabricate a report.
  */
+const HTML_COMMENT_START = "<!--";
+const HTML_COMMENT_ENDS = ["--!>", "-->"] as const;
+const APP_BUILD_MARKER = "app-build:";
+
+/** Drops every HTML comment, including ones closed by the HTML5 `--!>` end. */
+function stripHtmlComments(input: string): string {
+  let out = "";
+  for (let i = 0; i < input.length; ) {
+    if (!input.startsWith(HTML_COMMENT_START, i)) {
+      out += input[i]!;
+      i += 1;
+      continue;
+    }
+    const after = i + HTML_COMMENT_START.length;
+    let end = -1;
+    let width = 0;
+    for (const marker of HTML_COMMENT_ENDS) {
+      const at = input.indexOf(marker, after);
+      if (at >= 0 && (end < 0 || at < end)) {
+        end = at;
+        width = marker.length;
+      }
+    }
+    if (end < 0) return out;
+    i = end + width;
+  }
+  return out;
+}
+
+/** Removes leftover comment delimiters until none can be spliced back together. */
+function stripCommentDelimiters(input: string): string {
+  let out = "";
+  for (let i = 0; i < input.length; ) {
+    if (input.startsWith(HTML_COMMENT_START, i)) {
+      i += HTML_COMMENT_START.length;
+      continue;
+    }
+    const end = HTML_COMMENT_ENDS.find((marker) => input.startsWith(marker, i));
+    if (end) {
+      i += end.length;
+      continue;
+    }
+    out += input[i]!;
+    i += 1;
+  }
+  return out;
+}
+
+function stripAppBuildMarker(input: string): string {
+  const lower = input.toLowerCase();
+  let out = "";
+  for (let i = 0; i < input.length; ) {
+    if (lower.startsWith(APP_BUILD_MARKER, i)) {
+      i += APP_BUILD_MARKER.length;
+      continue;
+    }
+    out += input[i]!;
+    i += 1;
+  }
+  return out;
+}
+
 export function sanitizeFeedback(message: string): string {
   // Repeat until stable: removing an inner comment can splice an outer marker
   // back together ("<!<!-- -->-- app-build:report -->"). Then drop any stray
-  // delimiter or marker prefix left behind.
+  // delimiter or marker prefix left behind. `--!>` is a real comment end.
   let text = message;
   for (let i = 0; i < 20; i += 1) {
-    const next = text.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+    const next = stripHtmlComments(text);
     if (next === text) break;
     text = next;
   }
-  return text
-    .replace(/<!--|-->/g, "")
-    .replace(/app-build:/gi, "")
-    .trim()
-    .slice(0, MAX_FEEDBACK_CHARS);
+  for (let i = 0; i < 20; i += 1) {
+    const next = stripCommentDelimiters(text);
+    if (next === text) break;
+    text = next;
+  }
+  return stripAppBuildMarker(text).trim().slice(0, MAX_FEEDBACK_CHARS);
 }
 
 /** A plain-text summary of a build's status, for a chat reply or a log line. */

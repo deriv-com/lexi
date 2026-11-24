@@ -15,6 +15,35 @@ if (!roots.length) roots.push('.');
 const EXT = new Set(['.html', '.htm', '.css', '.scss', '.less', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.mdx']);
 const SKIP = new Set(['node_modules', '.git', '.next', '.nuxt', '.svelte-kit', 'dist', 'build', 'out', '.vercel', '.taste-skill', 'coverage', '.turbo', 'vendor']);
 
+// Line, block, and HTML comments are not copy. HTML comments also end at `--!>`,
+// including when the closer is on a later part of the same buffer.
+function stripNonCopy(line) {
+  let out = '';
+  for (let i = 0; i < line.length; ) {
+    if (line.startsWith('//', i)) break;
+    if (line.startsWith('/*', i)) {
+      const end = line.indexOf('*/', i + 2);
+      if (end < 0) { out += line[i]; i += 1; continue; }
+      i = end + 2;
+      continue;
+    }
+    if (line.startsWith('<!--', i)) {
+      const endDash = line.indexOf('-->', i + 4);
+      const endBang = line.indexOf('--!>', i + 4);
+      let end = -1;
+      let width = 0;
+      if (endDash >= 0) { end = endDash; width = 3; }
+      if (endBang >= 0 && (end < 0 || endBang < end)) { end = endBang; width = 4; }
+      if (end < 0) { out += line[i]; i += 1; continue; }
+      i = end + width;
+      continue;
+    }
+    out += line[i];
+    i += 1;
+  }
+  return out;
+}
+
 const files = []; const tooBig = [];
 const walk = (p) => {
   let st; try { st = statSync(p); } catch { return; }
@@ -71,7 +100,7 @@ for (const file of files) {
     if (/<\/(pre|code)>/i.test(line)) inCode = false;
     if (line.length > 2000) return; // minified or data
     if (/taste-skill-ignore/.test(line)) return;
-    if (!/^\s*(\/\/|\/\*|\*|<!--)/.test(line)) emDashes += (line.replace(/\/\/.*$|\/\*.*?\*\/|<!--.*?-->/g, '').match(/—/g) || []).length; // comments are not copy
+    if (!/^\s*(\/\/|\/\*|\*|<!--)/.test(line)) emDashes += (stripNonCopy(line).match(/—/g) || []).length; // comments are not copy
     for (const [level, id, re, message] of R) {
       if (id === 'mono' && (codeLine || /(^|[\s,>+~(])(pre|code|kbd|samp)\b|code/i.test(selector))) continue; // real code may be monospace
       if ((id === 'hairline' || id === 'outlined-box') && /(^|[\s,>+~(])(table|thead|tbody|tfoot|tr|td|th|input|textarea|select|fieldset)\b/i.test(selector)) continue; // real tables and form fields keep their lines

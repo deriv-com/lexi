@@ -8,7 +8,10 @@
    Cursor/Kiro agent running on this Mac (see README: "Wiring it for real"). */
 const $=s=>document.querySelector(s);
 const now=()=>new Date().toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
-const esc=s=>s.replace(/</g,"&lt;");
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function node(tag,className){ const n=document.createElement(tag); if(className) n.className=className; return n; }
+function youAvatar(){ const wrap=node("span","avatar"); const tpl=document.createElement("template"); tpl.innerHTML=youSVG; wrap.appendChild(tpl.content.firstElementChild); return wrap; }
+function agentAvatar(agent){ const wrap=node("span","avatar"); if(!/^[a-z]+$/.test(agent.id)) return wrap; const existing=document.querySelector("#ag-"+agent.id+" .avatar"); if(existing&&existing.firstElementChild) wrap.appendChild(existing.firstElementChild.cloneNode(true)); return wrap; }
 let playing=false, ticker=null, changesUsed=false;
 
 const CREW=[
@@ -83,10 +86,13 @@ async function summon(id,reason){
 const log=$("#chat-log");
 function scrollChat(){ log.scrollTop=log.scrollHeight; }
 function chat(who,text){
-  const d=document.createElement("div");
-  if(who==="sys"){ d.className="msg sys"; d.innerHTML=`<span class="msg-text">${text}</span>`; }
-  else if(who==="you"){ d.className="msg you"; d.innerHTML=`<span class="avatar">${youSVG}</span><div class="msg-body"><div class="msg-who">You<time>${now()}</time></div><span class="msg-text">${text}</span></div>`; }
-  else { const a=byId[who]; d.className="msg"; d.innerHTML=`<span class="avatar">${a?botSVG(a):""}</span><div class="msg-body"><div class="msg-who">${a?a.name:who}<time>${now()}</time></div><span class="msg-text">${text}</span></div>`; }
+  const d=node("div");
+  const msgText=node("span","msg-text");
+  msgText.textContent=String(text??"");
+  const whoLine=(label)=>{ const line=node("div","msg-who"); line.append(label); const time=node("time"); time.textContent=now(); line.appendChild(time); return line; };
+  if(who==="sys"){ d.className="msg sys"; d.appendChild(msgText); }
+  else if(who==="you"){ d.className="msg you"; const body=node("div","msg-body"); body.append(whoLine("You"), msgText); d.append(youAvatar(), body); }
+  else { const a=typeof who==="string" && Object.hasOwn(byId, who) ? byId[who] : undefined; d.className="msg"; const body=node("div","msg-body"); body.append(whoLine(a?a.name:String(who)), msgText); if(a) d.appendChild(agentAvatar(a)); d.appendChild(body); }
   log.appendChild(d); scrollChat(); return d;
 }
 function typing(a){ $("#typing-avatar").innerHTML=botSVG(a); $("#typing-name").textContent=a.name+" is typing"; $("#typing").classList.remove("hidden"); }
@@ -99,10 +105,21 @@ function clearBubble(id){ const b=$("#bub-"+id); if(!b)return; b.classList.remov
 /* a decision Lexi needs from the human — batched, recommendation first */
 function askDecision(title,why,options){
   return new Promise(resolve=>{
-    const d=document.createElement("div"); d.className="msg";
-    d.innerHTML=`<span class="avatar">${botSVG(byId.lexi)}</span><div class="msg-body"><div class="msg-who">Lexi · decision needed<time>${now()}</time></div>
-      <div class="dec-card"><div class="dec-title">${title}</div><div class="dec-why">${why}</div>
-      <div class="dec-opts">${options.map((o,i)=>`<button class="dec-opt" data-i="${i}">${o.rec?'<span class="rec">RECOMMENDED</span>':""}<span>${o.label}${o.note?`<br><small>${o.note}</small>`:""}</span></button>`).join("")}</div></div></div>`;
+    const d=node("div"); d.className="msg";
+    const body=node("div","msg-body");
+    const whoLine=node("div","msg-who"); whoLine.append("Lexi · decision needed"); const time=node("time"); time.textContent=now(); whoLine.appendChild(time);
+    const card=node("div","dec-card");
+    const titleEl=node("div","dec-title"); titleEl.textContent=String(title??"");
+    const whyEl=node("div","dec-why"); whyEl.textContent=String(why??"");
+    const opts=node("div","dec-opts");
+    (options||[]).forEach((o,i)=>{
+      const b=node("button","dec-opt"); b.type="button"; b.dataset.i=String(i);
+      if(o.rec){ const rec=node("span","rec"); rec.textContent="RECOMMENDED"; b.appendChild(rec); }
+      const label=node("span"); label.textContent=String(o.label??"");
+      if(o.note){ label.appendChild(document.createElement("br")); const small=node("small"); small.textContent=String(o.note); label.appendChild(small); }
+      b.appendChild(label); opts.appendChild(b);
+    });
+    card.append(titleEl, whyEl, opts); body.append(whoLine, card); d.append(agentAvatar(byId.lexi), body);
     log.appendChild(d); scrollChat();
     d.querySelectorAll(".dec-opt").forEach(b=>b.onclick=()=>{ const i=+b.dataset.i; d.querySelector(".dec-card").classList.add("resolved"); b.classList.add("chosen"); chat("you",esc(options[i].label)); resolve(i); });
   });
@@ -130,7 +147,7 @@ function artifact(cardId,bodyId,html){ $("#"+cardId).classList.add("live"); $("#
 const el=n=>document.querySelector(`[data-el="${n}"]`);
 function touch(n){ el(n).classList.add("touched"); setTimeout(()=>el(n).classList.remove("touched"),1600); }
 function pin(n){ const node=el(n), r=node.getBoundingClientRect(), t=$("#screen").getBoundingClientRect(); const d=document.createElement("div"); d.className="pin"; d.style.left=(r.left-t.left+r.width-40)+"px"; d.style.top=(r.top-t.top+10)+"px"; d.innerHTML="<b>!</b>"; $("#pins").appendChild(d); setTimeout(()=>d.remove(),6000); }
-function sketch(n,label,h){ const e=el(n); e.classList.add("built"); e.innerHTML=`<div class="sketch" style="margin:12px 20px;${h?`min-height:${h}px`:""}">${label}</div>`; }
+function sketch(n,label,h){ const e=el(n); e.classList.add("built"); const box=node("div","sketch"); box.style.margin="12px 20px"; const height=Number(h); if(Number.isFinite(height)&&height>0) box.style.minHeight=height+"px"; box.textContent=String(label??""); e.replaceChildren(box); }
 
 function buildNav(){ const e=el("nav"); e.innerHTML=`<span class="brand">acme<em>·</em>markets</span><nav><span>Markets</span><span>Trade</span><span>Portfolio</span></nav><span class="nav-cta">Log in</span>`; e.classList.add("built"); }
 function buildHero(){ const bars=[38,52,44,66,58,80,70,92,76,88,64,95]; el("hero").innerHTML=`<div class="hero-kicker">EUR/USD · <span class="tick" data-sym="EURUSD">1.08452</span> · LIVE</div><h2 class="hero-title tight">Trade in under a minute.</h2><p class="hero-sub">Pick a market, set your stake, see exactly what you can win — before you commit a cent.</p><div class="chart">${bars.map((h,i)=>`<i class="${i===5||i===9?"down":""}" style="height:${h}%"></i>`).join("")}</div>`; el("hero").classList.add("built"); }
@@ -266,20 +283,23 @@ const BRIDGE_HTTP = /^https?:$/.test(location.protocol) && /^(127\.0\.0\.1|local
 const BRIDGE_WS = BRIDGE_HTTP.replace(/^http/, "ws");
 let bridgeWs=null, bridgeReady=false, bridgeRunning=false, sayChain=Promise.resolve(), sawReplay=false;
 const queueSay=(id,text)=>{ sayChain=sayChain.then(()=>say(id,text)).catch(()=>{}); return sayChain; };
-function sanitizeHtml(html){
-  const t=document.createElement("template"); t.innerHTML=String(html||"");
-  t.content.querySelectorAll("script,iframe,object,embed,link,style,form").forEach(n=>n.remove());
-  t.content.querySelectorAll("*").forEach(n=>{ [...n.attributes].forEach(a=>{ if(/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && !/^(#|\/)/.test(a.value.trim()))) n.removeAttribute(a.name); }); });
-  return t.innerHTML;
+function setSanitizedHtml(el, html){
+  const doc=new window.DOMParser().parseFromString(String(html||""), "text/html");
+  doc.body.querySelectorAll("script,iframe,object,embed,link,style,form").forEach(n=>n.remove());
+  doc.body.querySelectorAll("*").forEach(n=>{ [...n.attributes].forEach(a=>{ if(/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && !/^(#|\/)/.test(a.value.trim()))) n.removeAttribute(a.name); }); });
+  el.replaceChildren(...doc.body.childNodes);
 }
 function renderBridgeArtifact(card,lines){
   const kinds={match:"MATCH",beat:"BEAT",ignore:"IGNORE"}; const body=$("#"+card+"-body"); body.classList.add("dec-log");
-  body.innerHTML=(lines||[]).map(l=>{
-    if(kinds[l.kind]) return `<p class="pos ${l.kind}"><i>${kinds[l.kind]}</i><span>${esc(l.text)}</span></p>`;
-    if(l.kind==="assumed") return `<p class="assumed">${esc(l.text)} <em>(assumed)</em></p>`;
-    if(l.kind==="decision") return `<p><strong>${esc(l.text)}</strong></p>`;
-    return `<p>${esc(l.text)}</p>`;
-  }).join("");
+  body.replaceChildren();
+  for(const l of lines||[]){
+    const p=node("p"); const text=l.text==null?"":String(l.text);
+    if(kinds[l.kind]){ p.className="pos "+l.kind; const mark=node("i"); mark.textContent=kinds[l.kind]; const span=node("span"); span.textContent=text; p.append(mark, span); }
+    else if(l.kind==="assumed"){ p.className="assumed"; p.append(text+" "); const em=node("em"); em.textContent="(assumed)"; p.append(em); }
+    else if(l.kind==="decision"){ const strong=node("strong"); strong.textContent=text; p.append(strong); }
+    else p.textContent=text;
+    body.appendChild(p);
+  }
   $("#card-"+card).classList.add("live");
 }
 function applyRunnerState(r){
@@ -296,7 +316,8 @@ function handleBridgeEvent(ev){
     case "hello": {
       const sel=$("#runner-select");
       if(sel && Array.isArray(ev.runners)){
-        sel.innerHTML=ev.runners.map(r=>`<option value="${r.id}" ${r.id===ev.runner?"selected":""}>${r.label}${r.authenticated?"":r.available?" · login needed":" · not installed"}</option>`).join("");
+        sel.replaceChildren();
+        for(const r of ev.runners){ const opt=document.createElement("option"); opt.value=String(r.id??""); opt.textContent=String(r.label??"")+(r.authenticated?"":r.available?" · login needed":" · not installed"); if(r.id===ev.runner) opt.selected=true; sel.appendChild(opt); }
         sel.value=ev.runner;
       }
       const cur=(ev.runners||[]).find(r=>r.id===ev.runner);
@@ -313,7 +334,7 @@ function handleBridgeEvent(ev){
     case "say": if(ev.replay){ const a=byId[ev.agent]; if(a) chat(ev.agent,esc(ev.text)); } else queueSay(ev.agent,ev.text); break;
     case "pin": pin(ev.element||"hero"); break;
     case "wireframe": (ev.sketches||[]).forEach(s=>sketch(s.element,s.label,s.height)); break;
-    case "edit": { const e=el(ev.element); if(e){ e.innerHTML=sanitizeHtml(ev.html); e.classList.add("built"); touch(ev.element); } break; }
+    case "edit": { const e=el(ev.element); if(e){ setSanitizedHtml(e, ev.html); e.classList.add("built"); touch(ev.element); } break; }
     case "artifact": renderBridgeArtifact(ev.card,ev.lines); break;
     case "decision": askDecision(ev.title,ev.why,ev.options||[]).then(i=>{ if(bridgeWs?.readyState===1) bridgeWs.send(JSON.stringify({type:"decision-answer",id:ev.id,index:i})); }); break;
     case "approval": waitApproval(ev.summary||"",ev.title).then(v=>{ if(bridgeWs?.readyState===1) bridgeWs.send(JSON.stringify({type:"approval-answer",id:ev.id,verdict:v,instruction:v==="changes"?"Make it clearer and stronger — rework the main region.":undefined})); }); break;

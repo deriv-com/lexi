@@ -305,7 +305,12 @@ describe("status", () => {
 
 describe("sanitizeFeedback", () => {
   it("removes nested comments that would splice a marker back together", () => {
-    expect(sanitizeFeedback("a <!<!-- x -->-- app-build:report --> b")).not.toMatch(/<!--|-->|app-build:/);
+    const cleaned = sanitizeFeedback("a <!<!-- x -->-- app-build:report --> b");
+    expect(cleaned.includes("<!--")).toBe(false);
+    expect(cleaned.includes("-->")).toBe(false);
+    expect(cleaned.includes("--!>")).toBe(false);
+    expect(cleaned.toLowerCase().includes("app-build:")).toBe(false);
+    expect(sanitizeFeedback("a <!-- hidden --!> still --> b")).toBe("a  still  b");
     expect(sanitizeFeedback("  plain text  ")).toBe("plain text");
   });
 });
