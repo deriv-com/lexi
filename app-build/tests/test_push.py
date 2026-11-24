@@ -25,7 +25,8 @@ class PushScanTest(unittest.TestCase):
                 git('init', '-q')
                 git('commit', '-q', '--allow-empty', '-m', 'seed')
                 (runner / 'start-sha').write_text(git('rev-parse', 'HEAD').strip())
-                (repo / 'notes.txt').write_text(f'login {form}\n')
+                # Temp fixture the push scan must see. Not a stored credential.
+                (repo / 'notes.txt').write_text(f'login {form}\n')  # codeql[py/clear-text-storage-sensitive-data]
                 git('add', '.')
                 git('commit', '-qm', 'notes')
                 env = dict(os.environ, RUNNER_TEMP=str(runner), GITHUB_WORKSPACE=str(repo),

@@ -48,7 +48,8 @@ class FeedbackChecksTest(unittest.TestCase):
             gh = root / 'bin/gh'
             gh.write_text(GH)
             gh.chmod(0o755)
-            (root / 'fixtures.json').write_text(json.dumps(fixtures))
+            # Temp fixture the feedback check must see. Not a stored credential.
+            (root / 'fixtures.json').write_text(json.dumps(fixtures))  # codeql[py/clear-text-storage-sensitive-data]
             path = f'{root / "bin"}:{os.environ["PATH"]}'
             if without_node:
                 for tool in ('jq', 'python3'):

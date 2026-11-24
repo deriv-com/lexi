@@ -49,7 +49,8 @@ class RedactValuesTest(unittest.TestCase):
             for label, form in forms(value).items():
                 with self.subTest(secret=name, form=label), tempfile.TemporaryDirectory() as tmp:
                     f = Path(tmp, 'segment-1.jsonl')
-                    f.write_text(f'before {form} after\n')
+                    # Temp fixture the redactor must see. Not a stored credential.
+                    f.write_text(f'before {form} after\n')  # codeql[py/clear-text-storage-sensitive-data]
                     result = run('--files', str(f), env=SECRETS)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     out = f.read_text()
@@ -128,7 +129,8 @@ class RedactFilesTest(unittest.TestCase):
             text = root / 'nested' / 'notes.md'
             text.write_text('see ' + GITHUB_TOKENS[0])
             leaky = root / 'trace.bin'
-            leaky.write_bytes(b'\x00\x01' + SECRETS['ANTHROPIC_AUTH_TOKEN'].encode() + b'\x00')
+            # Temp fixture the redactor must see. Not a stored credential.
+            leaky.write_bytes(b'\x00\x01' + SECRETS['ANTHROPIC_AUTH_TOKEN'].encode() + b'\x00')  # codeql[py/clear-text-storage-sensitive-data]
             clean = root / 'shot.png'
             clean.write_bytes(b'\x89PNG\x00\x00 nothing here')
             outside = Path(tmp, 'outside.txt')

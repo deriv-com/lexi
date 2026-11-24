@@ -51,7 +51,8 @@ class ReportTest(unittest.TestCase):
             docs = root / 'repo/app/web/docs/build'
             docs.mkdir(parents=True)
             secret = 'fake-password-for-report-test'
-            (docs / 'LAST_SESSION.md').write_text(secret)
+            # Temp fixture the report redactor must see. Not a stored credential.
+            (docs / 'LAST_SESSION.md').write_text(secret)  # codeql[py/clear-text-storage-sensitive-data]
             (docs / 'PHASE').write_text('build')
             bindir = root / 'bin'
             bindir.mkdir()
