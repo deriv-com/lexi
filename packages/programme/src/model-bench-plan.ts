@@ -100,10 +100,7 @@ export function withoutBenchTasks<T extends TaskLike>(tasks: T[]): T[] {
  * `lexi/<id with : replaced by ->`, so anything outside [a-z0-9-] is folded.
  */
 export function benchModelSlug(model: string): string {
-  return model
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return (model.toLowerCase().match(/[a-z0-9]+/g) ?? []).join("-");
 }
 
 export function benchArmTaskId(sourceTaskId: string, runId: string, model: string): string {

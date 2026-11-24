@@ -50,8 +50,8 @@ class ReportTest(unittest.TestCase):
             (runner / 'pr-number').write_text('1')
             docs = root / 'repo/app/web/docs/build'
             docs.mkdir(parents=True)
-            secret = 'fake-password-for-report-test'
-            (docs / 'LAST_SESSION.md').write_text(secret)
+            canary = 'fake-canary-for-report-test'
+            (docs / 'LAST_SESSION.md').write_text(canary)
             (docs / 'PHASE').write_text('build')
             bindir = root / 'bin'
             bindir.mkdir()
@@ -66,12 +66,12 @@ class ReportTest(unittest.TestCase):
                        GITHUB_WORKSPACE=str(root / 'repo'), LEXI_APP='web', LEXI_APP_DIR='app/web',
                        LEXI_APP_LABEL='Example app', LEXI_SESSION='1', LEXI_MAX_SESSIONS='3',
                        LEXI_BRANCH='example', GITHUB_SERVER_URL='https://github.com',
-                       GITHUB_REPOSITORY='example/app', GITHUB_RUN_ID='123', STAGING_REAL_PASSWORD=secret)
+                       GITHUB_REPOSITORY='example/app', GITHUB_RUN_ID='123', STAGING_REAL_PASSWORD=canary)
             result = subprocess.run(['bash', str(REPORT), 'session'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             for name in ('report.md', 'report.md.trim', 'posted.md'):
                 text = (runner / name).read_text()
-                self.assertNotIn(secret, text)
+                self.assertNotIn(canary, text)
                 self.assertIn('[redacted]', text)
 
     def feedback_report(self, files=None, push_outcome='success', with_cursor_script=True):

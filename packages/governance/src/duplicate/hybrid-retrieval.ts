@@ -306,9 +306,22 @@ function getOrCreate(
 
 // --- Signal extraction helpers ---
 
+function extractErrorNames(text: string): string[] {
+  const out: string[] = [];
+  for (const word of text.match(/[A-Za-z]+/g) ?? []) {
+    const firstUpper = word.search(/[A-Z]/);
+    const lastError = word.lastIndexOf("Error");
+    if (firstUpper !== -1 && lastError >= firstUpper + 2) {
+      out.push(word.slice(firstUpper, lastError + "Error".length));
+    }
+  }
+  out.push(...(text.match(/ERR_[A-Z0-9_]+|ENOENT|EACCES|ETIMEDOUT/g) ?? []));
+  return out;
+}
+
 function extractSignatures(text: string): string[] {
   const signatures: string[] = [];
-  const errorPatterns = text.match(/[A-Z][A-Za-z]+Error|ERR_[A-Z0-9_]+|ENOENT|EACCES|ETIMEDOUT/g) ?? [];
+  const errorPatterns = extractErrorNames(text);
   const httpErrors = text.match(/(?:status|HTTP|response)\s*(?:code\s*)?(\d{3})/gi) ?? [];
   signatures.push(...errorPatterns, ...httpErrors);
   return [...new Set(signatures)];

@@ -40,16 +40,25 @@ interface DocumentSection {
   body: string;
 }
 
+function matchSectionHeading(line: string): string | null {
+  let hashes = 0;
+  while (hashes < 4 && hashes < line.length && line[hashes] === "#") hashes += 1;
+  if (hashes !== 2 && hashes !== 3) return null;
+  if (hashes + 1 >= line.length || !/\s/.test(line[hashes]!)) return null;
+  if (/[\r\u2028\u2029]/.test(line)) return null;
+  return line.slice(hashes).trim();
+}
+
 /** h2/h3 sections; text before the first heading is ignored (title prose). */
 export function splitSections(markdown: string): DocumentSection[] {
   const sections: DocumentSection[] = [];
   const lines = markdown.split("\n");
   let current: DocumentSection | null = null;
   for (const line of lines) {
-    const heading = line.match(/^#{2,3}\s+(.+)$/);
-    if (heading) {
+    const heading = matchSectionHeading(line);
+    if (heading !== null) {
       if (current) sections.push(current);
-      current = { heading: heading[1].trim(), body: "" };
+      current = { heading, body: "" };
       continue;
     }
     if (current) current.body += `${line}\n`;

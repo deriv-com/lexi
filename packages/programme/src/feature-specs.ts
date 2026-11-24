@@ -21,10 +21,29 @@ const FILLER = new Set(["spec", "specs", "feature", "features", "page", "pages",
 /** Index files describe the directory, not one feature. */
 const INDEX_NAMES = new Set(["readme", "index", "_index", "overview"]);
 
+function stripBracketSegments(value: string): string {
+  let out = "";
+  let pos = 0;
+  while (pos < value.length) {
+    const open = value.indexOf("[", pos);
+    if (open === -1) {
+      out += value.slice(pos);
+      break;
+    }
+    out += value.slice(pos, open);
+    const close = value.indexOf("]", open + 1);
+    if (close === -1) {
+      out += value.slice(open);
+      break;
+    }
+    out += " ";
+    pos = close + 1;
+  }
+  return out;
+}
+
 function tokens(value: string): string[] {
-  return value
-    .toLowerCase()
-    .replace(/\[[^\]]*\]/g, " ") // dynamic segments: [id], [...slug]
+  return stripBracketSegments(value.toLowerCase()) // dynamic segments: [id], [...slug]
     .split(/[^a-z0-9]+/)
     .filter((token) => token.length > 0 && !/^\d+$/.test(token));
 }

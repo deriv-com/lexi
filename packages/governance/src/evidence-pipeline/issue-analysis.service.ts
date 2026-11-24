@@ -283,6 +283,21 @@ function isCompleteness(v: unknown): v is "complete" | "partial" | "minimal" {
 
 // ---- Deterministic fallback ----
 
+function hasOrderedKeywordsOnLine(
+  text: string,
+  pairs: ReadonlyArray<readonly [string, string]>,
+): boolean {
+  for (const line of text.toLowerCase().split(/\r?\n/)) {
+    for (const [first, second] of pairs) {
+      const idx = line.indexOf(first);
+      if (idx !== -1 && line.indexOf(second, idx + first.length) !== -1) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Heuristic analysis when LLM is unavailable.
  * Uses title patterns, labels, and body length to produce a conservative result.
@@ -308,7 +323,14 @@ function deterministicAnalysis(input: IssueAnalysisInput): IssueAnalysis {
   // Evidence quality from body
   let evidenceQuality: "strong" | "medium" | "weak" = "weak";
   if (input.body && input.body.length > 500) evidenceQuality = "medium";
-  if (input.body && input.body.length > 1000 && /steps.*reproduce|expected.*actual/i.test(input.body)) {
+  if (
+    input.body &&
+    input.body.length > 1000 &&
+    hasOrderedKeywordsOnLine(input.body, [
+      ["steps", "reproduce"],
+      ["expected", "actual"],
+    ])
+  ) {
     evidenceQuality = "strong";
   }
 

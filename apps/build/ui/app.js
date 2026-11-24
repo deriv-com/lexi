@@ -8,7 +8,6 @@
    Cursor/Kiro agent running on this Mac (see README: "Wiring it for real"). */
 const $=s=>document.querySelector(s);
 const now=()=>new Date().toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
-const esc=s=>s.replace(/</g,"&lt;");
 let playing=false, ticker=null, changesUsed=false;
 
 const CREW=[
@@ -21,7 +20,7 @@ const CREW=[
  {id:"check",name:"Check", role:"Reviewer · judges against the spec", color:"#2e9e5b", home:[8,74]},
  {id:"probe",name:"Probe", role:"Tester · clicks flows, hunts edge cases", color:"#d96c00", home:[93,72]},
 ];
-const byId=Object.fromEntries(CREW.map(a=>[a.id,a]));
+const byId=new Map(CREW.map(a=>[a.id,a]));
 
 /* ---------- bot avatars (dots with faces, one personality per agent) ---------- */
 const BOT={
@@ -65,17 +64,17 @@ const youSVG=`<svg class="bot" viewBox="0 0 48 48" role="img" aria-label="You" f
 function renderCrew(){
   $("#crew").innerHTML=CREW.map(a=>`<button class="crew-row ${a.summoned?"":"away"}" data-agent="${a.id}"><span class="avatar">${botSVG(a)}</span><span><span class="c-name">${a.name}</span><br><span class="c-role">${a.role}</span></span><span class="c-status" id="cs-${a.id}">${a.summoned?"at the table":"not summoned"}</span></button>`).join("");
   $("#crew-count").textContent=CREW.filter(a=>a.summoned).length+" at the table · local";
-  document.querySelectorAll(".crew-row").forEach(r=>r.onclick=()=>{ const a=byId[r.dataset.agent]; if(!a.summoned){ chat("sys",a.name+" hasn't been summoned for this job yet — Lexi assembles the crew per intent."); return; } goTo(a.id,"screen"); say(a.id, a.id==="lexi" ? "I run this table — intent in, product out, nothing ships without your OK." : `I'm ${a.name} — ${a.role.toLowerCase()}.`); });
+  document.querySelectorAll(".crew-row").forEach(r=>r.onclick=()=>{ const a=byId.get(r.dataset.agent); if(!a) return; if(!a.summoned){ chat("sys",a.name+" hasn't been summoned for this job yet — Lexi assembles the crew per intent."); return; } goTo(a.id,"screen"); say(a.id, a.id==="lexi" ? "I run this table — intent in, product out, nothing ships without your OK." : `I'm ${a.name} — ${a.role.toLowerCase()}.`); });
 }
 const layer=$("#agents-layer"), table=$("#table");
 layer.innerHTML=CREW.map(a=>`<div class="agent ${a.summoned?"":"away"}" id="ag-${a.id}"><div class="bubble" id="bub-${a.id}"></div><div class="avatar">${botSVG(a)}</div><span class="a-name">${a.name}</span></div>`).join("");
 function place(a,xPct,yPct){ const elx=$("#ag-"+a.id); elx.style.transform=`translate(${table.clientWidth*xPct/100-28}px, ${table.clientHeight*yPct/100-30}px)`; }
 function homes(){ CREW.forEach(a=>place(a,a.home[0],a.home[1])); }
 addEventListener("resize",homes);
-function setStatus(id,s){ const e=$("#cs-"+id); if(e)e.textContent=s; }
+function setStatus(id,s){ const e=byId.has(id)?$("#cs-"+id):null; if(e)e.textContent=s; }
 async function summon(id,reason){
-  const a=byId[id]; if(a.summoned) return; a.summoned=true;
-  $("#ag-"+id).classList.remove("away"); renderCrew(); place(a,a.home[0],a.home[1]);
+  const a=byId.get(id); if(!a||a.summoned) return; a.summoned=true;
+  $("#ag-"+a.id).classList.remove("away"); renderCrew(); place(a,a.home[0],a.home[1]);
   chat("sys",`— ${a.name} summoned to the table (${reason}) —`); await wait(500);
 }
 
@@ -84,53 +83,106 @@ const log=$("#chat-log");
 function scrollChat(){ log.scrollTop=log.scrollHeight; }
 function chat(who,text){
   const d=document.createElement("div");
-  if(who==="sys"){ d.className="msg sys"; d.innerHTML=`<span class="msg-text">${text}</span>`; }
-  else if(who==="you"){ d.className="msg you"; d.innerHTML=`<span class="avatar">${youSVG}</span><div class="msg-body"><div class="msg-who">You<time>${now()}</time></div><span class="msg-text">${text}</span></div>`; }
-  else { const a=byId[who]; d.className="msg"; d.innerHTML=`<span class="avatar">${a?botSVG(a):""}</span><div class="msg-body"><div class="msg-who">${a?a.name:who}<time>${now()}</time></div><span class="msg-text">${text}</span></div>`; }
+  const msgText=document.createElement("span");
+  msgText.className="msg-text";
+  msgText.textContent=String(text??"");
+  if(who==="sys"){
+    d.className="msg sys";
+    d.appendChild(msgText);
+  } else {
+    const isYou=who==="you";
+    const a=isYou?null:byId.get(who);
+    d.className=isYou?"msg you":"msg";
+    const av=document.createElement("span");
+    av.className="avatar";
+    av.innerHTML=isYou?youSVG:(a?botSVG(a):"");
+    const body=document.createElement("div");
+    body.className="msg-body";
+    const whoEl=document.createElement("div");
+    whoEl.className="msg-who";
+    whoEl.append(isYou?"You":(a?a.name:String(who??"")));
+    const timeEl=document.createElement("time");
+    timeEl.textContent=now();
+    whoEl.appendChild(timeEl);
+    body.append(whoEl,msgText);
+    d.append(av,body);
+  }
   log.appendChild(d); scrollChat(); return d;
 }
-function typing(a){ $("#typing-avatar").innerHTML=botSVG(a); $("#typing-name").textContent=a.name+" is typing"; $("#typing").classList.remove("hidden"); }
+function typing(a){ if(!a) return; $("#typing-avatar").innerHTML=botSVG(a); $("#typing-name").textContent=a.name+" is typing"; $("#typing").classList.remove("hidden"); }
 function untyping(){ $("#typing").classList.add("hidden"); }
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-async function say(id,text,ms=1150){ text=String(text).replaceAll("@@SAY@@"," ").replace(/\s{2,}/g," ").trim(); const a=byId[id]; typing(a); bubble(id,text); await wait(ms); untyping(); chat(id,esc(text)); await wait(320); clearBubble(id); }
-function bubble(id,text){ const b=$("#bub-"+id); if(!b)return; b.textContent=text; b.classList.add("show"); $("#ag-"+id).classList.add("speaking"); }
-function clearBubble(id){ const b=$("#bub-"+id); if(!b)return; b.classList.remove("show"); $("#ag-"+id).classList.remove("speaking"); }
+async function say(id,text,ms=1150){ const a=byId.get(id); if(!a) return; text=String(text).replaceAll("@@SAY@@"," ").replace(/\s{2,}/g," ").trim(); typing(a); bubble(a.id,text); await wait(ms); untyping(); chat(a.id,text); await wait(320); clearBubble(a.id); }
+function bubble(id,text){ if(!byId.has(id)) return; const b=$("#bub-"+id); if(!b)return; b.textContent=text; b.classList.add("show"); $("#ag-"+id).classList.add("speaking"); }
+function clearBubble(id){ if(!byId.has(id)) return; const b=$("#bub-"+id); if(!b)return; b.classList.remove("show"); $("#ag-"+id).classList.remove("speaking"); }
 
 /* a decision Lexi needs from the human — batched, recommendation first */
 function askDecision(title,why,options){
   return new Promise(resolve=>{
     const d=document.createElement("div"); d.className="msg";
-    d.innerHTML=`<span class="avatar">${botSVG(byId.lexi)}</span><div class="msg-body"><div class="msg-who">Lexi · decision needed<time>${now()}</time></div>
-      <div class="dec-card"><div class="dec-title">${title}</div><div class="dec-why">${why}</div>
-      <div class="dec-opts">${options.map((o,i)=>`<button class="dec-opt" data-i="${i}">${o.rec?'<span class="rec">RECOMMENDED</span>':""}<span>${o.label}${o.note?`<br><small>${o.note}</small>`:""}</span></button>`).join("")}</div></div></div>`;
+    const av=document.createElement("span"); av.className="avatar"; av.innerHTML=botSVG(byId.get("lexi"));
+    const body=document.createElement("div"); body.className="msg-body";
+    const whoEl=document.createElement("div"); whoEl.className="msg-who"; whoEl.append("Lexi · decision needed");
+    const timeEl=document.createElement("time"); timeEl.textContent=now(); whoEl.appendChild(timeEl);
+    const card=document.createElement("div"); card.className="dec-card";
+    const titleEl=document.createElement("div"); titleEl.className="dec-title"; titleEl.textContent=String(title??"");
+    const whyEl=document.createElement("div"); whyEl.className="dec-why"; whyEl.textContent=String(why??"");
+    const optsEl=document.createElement("div"); optsEl.className="dec-opts";
+    (Array.isArray(options)?options:[]).forEach((o,i)=>{
+      const btn=document.createElement("button"); btn.className="dec-opt"; btn.type="button"; btn.dataset.i=String(i);
+      if(o?.rec){ const rec=document.createElement("span"); rec.className="rec"; rec.textContent="RECOMMENDED"; btn.appendChild(rec); }
+      const labelWrap=document.createElement("span"); labelWrap.append(String(o?.label??""));
+      if(o?.note){ labelWrap.appendChild(document.createElement("br")); const noteEl=document.createElement("small"); noteEl.textContent=String(o.note); labelWrap.appendChild(noteEl); }
+      btn.appendChild(labelWrap);
+      btn.onclick=()=>{ card.classList.add("resolved"); btn.classList.add("chosen"); chat("you",String(o?.label??"")); resolve(i); };
+      optsEl.appendChild(btn);
+    });
+    card.append(titleEl,whyEl,optsEl);
+    body.append(whoEl,card);
+    d.append(av,body);
     log.appendChild(d); scrollChat();
-    d.querySelectorAll(".dec-opt").forEach(b=>b.onclick=()=>{ const i=+b.dataset.i; d.querySelector(".dec-card").classList.add("resolved"); b.classList.add("chosen"); chat("you",esc(options[i].label)); resolve(i); });
   });
 }
 function logDecision(text,assumed){
-  const b=$("#decisions-body"); if(b.querySelector(".empty")) b.innerHTML="";
-  b.insertAdjacentHTML("beforeend",`<p class="${assumed?"assumed":""}">${assumed?"":"<strong>You:</strong> "}${esc(text)} ${assumed?'<em>(assumed)</em>':""}</p>`);
+  const b=$("#decisions-body"); if(b.querySelector(".empty")) b.replaceChildren();
+  const p=document.createElement("p");
+  if(assumed){ p.className="assumed"; }
+  else { const strong=document.createElement("strong"); strong.textContent="You:"; p.append(strong," "); }
+  p.append(String(text??""));
+  if(assumed){ const em=document.createElement("em"); em.textContent="(assumed)"; p.append(" ",em); }
+  b.appendChild(p);
   $("#card-decisions").classList.add("live");
 }
 
 /* ---------- movement ---------- */
 async function goToEl(id,node){
-  const a=byId[id]; const e=$("#ag-"+id); e.classList.add("working"); setStatus(id,"working");
+  const a=byId.get(id); if(!a||!node) return; const e=$("#ag-"+a.id); e.classList.add("working"); setStatus(a.id,"working");
   const r=node.getBoundingClientRect(), t=table.getBoundingClientRect();
   place(a,(r.left-t.left-16)/t.width*100,(r.top-t.top+r.height/2)/t.height*100);
   await wait(1200); e.classList.remove("working");
 }
-const goTo=(id,target)=>goToEl(id, target==="screen" ? $("#device") : document.querySelector(`[data-el="${target}"]`));
-async function goHome(id){ const a=byId[id]; place(a,a.home[0],a.home[1]); setStatus(id,"at the table"); await wait(850); }
+const REGIONS=new Set(["nav","hero","features","pricing","footer"]);
+const el=n=>REGIONS.has(n)?document.querySelector(`[data-el="${n}"]`):null;
+const goTo=(id,target)=>goToEl(id, target==="screen" ? $("#device") : el(target));
+async function goHome(id){ const a=byId.get(id); if(!a) return; place(a,a.home[0],a.home[1]); setStatus(a.id,"at the table"); await wait(850); }
 
 /* ---------- artifacts ---------- */
 function artifact(cardId,bodyId,html){ $("#"+cardId).classList.add("live"); $("#"+bodyId).innerHTML=html; }
 
 /* ---------- screen edits ---------- */
-const el=n=>document.querySelector(`[data-el="${n}"]`);
-function touch(n){ el(n).classList.add("touched"); setTimeout(()=>el(n).classList.remove("touched"),1600); }
-function pin(n){ const node=el(n), r=node.getBoundingClientRect(), t=$("#screen").getBoundingClientRect(); const d=document.createElement("div"); d.className="pin"; d.style.left=(r.left-t.left+r.width-40)+"px"; d.style.top=(r.top-t.top+10)+"px"; d.innerHTML="<b>!</b>"; $("#pins").appendChild(d); setTimeout(()=>d.remove(),6000); }
-function sketch(n,label,h){ const e=el(n); e.classList.add("built"); e.innerHTML=`<div class="sketch" style="margin:12px 20px;${h?`min-height:${h}px`:""}">${label}</div>`; }
+function touch(n){ const node=el(n); if(!node) return; node.classList.add("touched"); setTimeout(()=>node.classList.remove("touched"),1600); }
+function pin(n){ const node=el(n); if(!node) return; const r=node.getBoundingClientRect(), t=$("#screen").getBoundingClientRect(); const d=document.createElement("div"); d.className="pin"; d.style.left=(r.left-t.left+r.width-40)+"px"; d.style.top=(r.top-t.top+10)+"px"; d.innerHTML="<b>!</b>"; $("#pins").appendChild(d); setTimeout(()=>d.remove(),6000); }
+function sketch(n,label,h){
+  const e=el(n); if(!e) return;
+  e.classList.add("built");
+  const box=document.createElement("div");
+  box.className="sketch";
+  box.style.margin="12px 20px";
+  const height=Number(h);
+  if(Number.isFinite(height)&&height>0) box.style.minHeight=`${height}px`;
+  box.textContent=String(label??"");
+  e.replaceChildren(box);
+}
 
 function buildNav(){ const e=el("nav"); e.innerHTML=`<span class="brand">acme<em>·</em>markets</span><nav><span>Markets</span><span>Trade</span><span>Portfolio</span></nav><span class="nav-cta">Log in</span>`; e.classList.add("built"); }
 function buildHero(){ const bars=[38,52,44,66,58,80,70,92,76,88,64,95]; el("hero").innerHTML=`<div class="hero-kicker">EUR/USD · <span class="tick" data-sym="EURUSD">1.08452</span> · LIVE</div><h2 class="hero-title tight">Trade in under a minute.</h2><p class="hero-sub">Pick a market, set your stake, see exactly what you can win — before you commit a cent.</p><div class="chart">${bars.map((h,i)=>`<i class="${i===5||i===9?"down":""}" style="height:${h}%"></i>`).join("")}</div>`; el("hero").classList.add("built"); }
@@ -162,7 +214,7 @@ function waitApproval(sub,title){
 /* ================= THE PIPELINE, AS A STORYBOARD ================= */
 async function buildStory(intent){
   if(playing) return; playing=true; changesUsed=false; $("#btn-start").disabled=true;
-  chat("sys","— a new build opens on the table —"); chat("you",esc(intent));
+  chat("sys","— a new build opens on the table —"); chat("you",intent);
   $("#project-name").textContent="Acme Markets — first-trade app";
   $("#project-sub").textContent="Intent received. Lexi runs the pipeline: spec → plan → wireframe → build ⇄ review → your approval → ship.";
 
@@ -248,7 +300,7 @@ async function buildStory(intent){
 
 /* small live edit after ship / mid-table chat */
 async function smallEdit(text){
-  if(playing) return; playing=true; chat("you",esc(text));
+  if(playing) return; playing=true; chat("you",text);
   await say("lexi","On it — Forge takes it, Check keeps an eye on it.");
   const target=/price|payout|trade|stake/i.test(text)?"pricing":/market/i.test(text)?"features":/chart|hero|top/i.test(text)?"hero":"nav";
   await summon("forge","live edit"); await goTo("forge",target); touch(target); await say("forge","Done — changed on the screen. Take a look."); await goHome("forge");
@@ -266,20 +318,177 @@ const BRIDGE_HTTP = /^https?:$/.test(location.protocol) && /^(127\.0\.0\.1|local
 const BRIDGE_WS = BRIDGE_HTTP.replace(/^http/, "ws");
 let bridgeWs=null, bridgeReady=false, bridgeRunning=false, sayChain=Promise.resolve(), sawReplay=false;
 const queueSay=(id,text)=>{ sayChain=sayChain.then(()=>say(id,text)).catch(()=>{}); return sayChain; };
-function sanitizeHtml(html){
-  const t=document.createElement("template"); t.innerHTML=String(html||"");
-  t.content.querySelectorAll("script,iframe,object,embed,link,style,form").forEach(n=>n.remove());
-  t.content.querySelectorAll("*").forEach(n=>{ [...n.attributes].forEach(a=>{ if(/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && !/^(#|\/)/.test(a.value.trim()))) n.removeAttribute(a.name); }); });
-  return t.innerHTML;
+const SAFE_TAGS=new Map([
+  "a","article","aside","b","blockquote","br","button","code","dd","div","dl","dt",
+  "em","figcaption","figure","footer","h1","h2","h3","h4","h5","h6","header","hr",
+  "i","kbd","label","li","main","mark","nav","ol","p","pre","s","section",
+  "small","span","strong","sub","sup","table","tbody","td","tfoot","th","thead","time","tr","u","ul",
+].map(t=>[t,t]));
+const VOID_TAGS=new Set(["area","base","br","col","embed","hr","img","input","link","meta","source","track","wbr"]);
+const DROP_CONTENT_TAGS=new Set(["script","style","iframe","object","embed","template","svg","math","noscript"]);
+const NAMED_ENTITIES={amp:"&",lt:"<",gt:">",quot:'"',apos:"'",nbsp:"\u00a0",middot:"·",rarr:"→",larr:"←",uarr:"↑",darr:"↓",mdash:"—",ndash:"–"};
+function decodeEntities(str){
+  return String(str||"").replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z]{2,8});/g,(m,body)=>{
+    if(body[0]==="#"){
+      const cp=body[1]==="x"||body[1]==="X"?parseInt(body.slice(2),16):parseInt(body.slice(1),10);
+      return Number.isFinite(cp)&&cp>0&&cp<=0x10ffff?String.fromCodePoint(cp):m;
+    }
+    return Object.hasOwn(NAMED_ENTITIES,body)?NAMED_ENTITIES[body]:m;
+  });
 }
+function sanitizeInlineStyle(val){
+  return String(val||"").split(";").map(d=>d.trim()).filter(d=>{
+    const idx=d.indexOf(":");
+    if(idx<=0) return false;
+    const prop=d.slice(0,idx).trim().toLowerCase();
+    const rhs=d.slice(idx+1).trim();
+    if(!/^[a-z]{2,24}(?:-[a-z]{1,24}){0,3}$/.test(prop)) return false;
+    return /^(?:#[0-9a-fA-F]{3,8}|var\(--[a-zA-Z0-9-]{1,40}\)|[a-zA-Z]{2,20}(?:-[a-zA-Z]{2,20})?|-?\d{1,5}(?:\.\d{1,4})?(?:px|%|rem|em|vh|vw|s|ms)?(?:\s+-?\d{1,5}(?:\.\d{1,4})?(?:px|%|rem|em|vh|vw)?){0,3})$/.test(rhs);
+  }).join("; ");
+}
+function parseTagAttributes(raw){
+  const attrs=[];
+  let i=0;
+  const n=raw.length;
+  while(i<n){
+    while(i<n&&raw.charCodeAt(i)<=32) i++;
+    if(i>=n||raw[i]==="/") break;
+    const nameStart=i;
+    while(i<n&&raw.charCodeAt(i)>32&&raw[i]!=="="&&raw[i]!== "/"&&raw[i]!==">") i++;
+    const name=raw.slice(nameStart,i).toLowerCase();
+    while(i<n&&raw.charCodeAt(i)<=32) i++;
+    let value="";
+    if(raw[i]==="="){
+      i++;
+      while(i<n&&raw.charCodeAt(i)<=32) i++;
+      if(raw[i]==='"'||raw[i]==="'"){
+        const q=raw[i++];
+        const valStart=i;
+        const endQ=raw.indexOf(q,i);
+        if(endQ===-1){ value=raw.slice(valStart); i=n; }
+        else { value=raw.slice(valStart,endQ); i=endQ+1; }
+      } else {
+        const valStart=i;
+        while(i<n&&raw.charCodeAt(i)>32&&raw[i]!==">") i++;
+        value=raw.slice(valStart,i);
+      }
+    }
+    if(name) attrs.push([name,decodeEntities(value)]);
+  }
+  return attrs;
+}
+function applySafeAttributes(node,tag,attrs){
+  for(const [name,val] of attrs){
+    switch(name){
+      case "class": node.className=val; break;
+      case "title": node.title=val; break;
+      case "aria-label": node.setAttribute("aria-label",val); break;
+      case "aria-hidden": if(val==="true"||val==="false") node.setAttribute("aria-hidden",val); break;
+      case "aria-current": node.setAttribute("aria-current",val); break;
+      case "role": node.setAttribute("role",val); break;
+      case "data-sym": node.dataset.sym=val; break;
+      case "colspan": if(/^\d{1,2}$/.test(val)) node.setAttribute("colspan",val); break;
+      case "rowspan": if(/^\d{1,2}$/.test(val)) node.setAttribute("rowspan",val); break;
+      case "type": if(tag==="button"&&(val==="button"||val==="reset")) node.setAttribute("type",val); break;
+      case "style": { const s=sanitizeInlineStyle(val); if(s) node.setAttribute("style",s); break; }
+    }
+  }
+  if(tag==="a") node.setAttribute("href","#");
+  if(tag==="button"&&!node.hasAttribute("type")) node.setAttribute("type","button");
+}
+function renderSafeHtml(container,html){
+  const src=String(html||"");
+  const root=document.createDocumentFragment();
+  const stack=[{tag:null,node:root}];
+  let pos=0;
+  while(pos<src.length){
+    const lt=src.indexOf("<",pos);
+    if(lt===-1){
+      stack[stack.length-1].node.appendChild(document.createTextNode(decodeEntities(src.slice(pos))));
+      break;
+    }
+    if(lt>pos){
+      stack[stack.length-1].node.appendChild(document.createTextNode(decodeEntities(src.slice(pos,lt))));
+    }
+    if(src.startsWith("<!--",lt)){
+      let scan=lt+4, endComment=-1;
+      while(scan<src.length){
+        const dash=src.indexOf("--",scan);
+        if(dash===-1) break;
+        if(src[dash+2]===">"){ endComment=dash+3; break; }
+        if(src[dash+2]==="!"&&src[dash+3]===">"){ endComment=dash+4; break; }
+        scan=dash+1;
+      }
+      pos=endComment===-1?src.length:endComment;
+      continue;
+    }
+    const gt=src.indexOf(">",lt+1);
+    if(gt===-1){
+      stack[stack.length-1].node.appendChild(document.createTextNode(decodeEntities(src.slice(lt))));
+      break;
+    }
+    const inside=src.slice(lt+1,gt).trim();
+    pos=gt+1;
+    if(!inside||inside[0]==="!"||inside[0]==="?") continue;
+    if(inside[0]==="/"){
+      const closeName=inside.slice(1).trim().split(/[\s/]/,1)[0].toLowerCase();
+      for(let s=stack.length-1;s>=1;s--){
+        if(stack[s].tag===closeName){ stack.length=s; break; }
+      }
+      continue;
+    }
+    let nameEnd=0;
+    while(nameEnd<inside.length&&inside.charCodeAt(nameEnd)>32&&inside[nameEnd]!== "/") nameEnd++;
+    const rawTag=inside.slice(0,nameEnd).toLowerCase();
+    const selfClosing=inside.endsWith("/")||VOID_TAGS.has(rawTag);
+    if(DROP_CONTENT_TAGS.has(rawTag)){
+      if(!selfClosing){
+        const lowerRest=src.slice(pos).toLowerCase();
+        const closeNeedle="</"+rawTag;
+        const relClose=lowerRest.indexOf(closeNeedle);
+        if(relClose===-1){ break; }
+        const closeGt=src.indexOf(">",pos+relClose+closeNeedle.length);
+        pos=closeGt===-1?src.length:closeGt+1;
+      }
+      continue;
+    }
+    const safeTag=SAFE_TAGS.get(rawTag);
+    if(!safeTag) continue;
+    const elem=document.createElement(safeTag);
+    applySafeAttributes(elem,safeTag,parseTagAttributes(inside.slice(nameEnd)));
+    stack[stack.length-1].node.appendChild(elem);
+    if(!selfClosing) stack.push({tag:safeTag,node:elem});
+  }
+  container.replaceChildren(root);
+}
+const ARTIFACT_CARDS=new Set(["spec","research","positioning","decisions"]);
+const ARTIFACT_KINDS=new Map([["match","MATCH"],["beat","BEAT"],["ignore","IGNORE"]]);
 function renderBridgeArtifact(card,lines){
-  const kinds={match:"MATCH",beat:"BEAT",ignore:"IGNORE"}; const body=$("#"+card+"-body"); body.classList.add("dec-log");
-  body.innerHTML=(lines||[]).map(l=>{
-    if(kinds[l.kind]) return `<p class="pos ${l.kind}"><i>${kinds[l.kind]}</i><span>${esc(l.text)}</span></p>`;
-    if(l.kind==="assumed") return `<p class="assumed">${esc(l.text)} <em>(assumed)</em></p>`;
-    if(l.kind==="decision") return `<p><strong>${esc(l.text)}</strong></p>`;
-    return `<p>${esc(l.text)}</p>`;
-  }).join("");
+  if(!ARTIFACT_CARDS.has(card)) return;
+  const body=$("#"+card+"-body"); if(!body) return;
+  body.classList.add("dec-log");
+  const nodes=(Array.isArray(lines)?lines:[]).map(l=>{
+    const p=document.createElement("p");
+    const text=String(l?.text??"");
+    const badge=ARTIFACT_KINDS.get(l?.kind);
+    if(badge){
+      p.className="pos "+l.kind;
+      const iEl=document.createElement("i"); iEl.textContent=badge;
+      const span=document.createElement("span"); span.textContent=text;
+      p.append(iEl,span);
+    } else if(l?.kind==="assumed"){
+      p.className="assumed";
+      const em=document.createElement("em"); em.textContent="(assumed)";
+      p.append(text," ",em);
+    } else if(l?.kind==="decision"){
+      const strong=document.createElement("strong"); strong.textContent=text;
+      p.appendChild(strong);
+    } else {
+      p.textContent=text;
+    }
+    return p;
+  });
+  body.replaceChildren(...nodes);
   $("#card-"+card).classList.add("live");
 }
 function applyRunnerState(r){
@@ -296,29 +505,36 @@ function handleBridgeEvent(ev){
     case "hello": {
       const sel=$("#runner-select");
       if(sel && Array.isArray(ev.runners)){
-        sel.innerHTML=ev.runners.map(r=>`<option value="${r.id}" ${r.id===ev.runner?"selected":""}>${r.label}${r.authenticated?"":r.available?" · login needed":" · not installed"}</option>`).join("");
-        sel.value=ev.runner;
+        const opts=ev.runners.map(r=>{
+          const opt=document.createElement("option");
+          opt.value=String(r?.id??"");
+          opt.selected=r?.id===ev.runner;
+          opt.textContent=String(r?.label??"")+(r?.authenticated?"":r?.available?" · login needed":" · not installed");
+          return opt;
+        });
+        sel.replaceChildren(...opts);
+        sel.value=String(ev.runner??"");
       }
       const cur=(ev.runners||[]).find(r=>r.id===ev.runner);
       if(cur) applyRunnerState(cur); else { bridgeReady=false; }
       chat("sys","— Lexi Bridge connected · choose who works (Kiro / Claude / Cursor / Codex) in the topbar · Start runs the real pipeline with the chosen runner —");
       break; }
-    case "runner": applyRunnerState(ev); chat("sys",`— agents: ${esc(ev.label)}${ev.model?` · model ${esc(ev.model)}`:""} · ${esc(ev.detail||"")} —`); break;
+    case "runner": applyRunnerState(ev); chat("sys",`— agents: ${ev.label||""}${ev.model?` · model ${ev.model}`:""} · ${ev.detail||""} —`); break;
     case "project": $("#project-name").textContent=ev.name||"Untitled product"; $("#project-sub").textContent="Real build · agents working in "+(ev.workspace||"a local workspace"); break;
     case "phase": { const i=PHASES.indexOf(ev.name); if(i>=0) setPhase(i); break; }
-    case "sys": chat("sys",esc(ev.text)); break;
+    case "sys": chat("sys",ev.text); break;
     case "status-report": queueSay("lexi",ev.text); break;
     case "summon": summon(ev.agent,ev.reason||""); break;
     case "move": ev.card ? goToEl(ev.agent,document.getElementById(ev.card)) : goTo(ev.agent,ev.to||"screen"); break;
-    case "say": if(ev.replay){ const a=byId[ev.agent]; if(a) chat(ev.agent,esc(ev.text)); } else queueSay(ev.agent,ev.text); break;
+    case "say": if(ev.replay){ const a=byId.get(ev.agent); if(a) chat(a.id,ev.text); } else queueSay(ev.agent,ev.text); break;
     case "pin": pin(ev.element||"hero"); break;
     case "wireframe": (ev.sketches||[]).forEach(s=>sketch(s.element,s.label,s.height)); break;
-    case "edit": { const e=el(ev.element); if(e){ e.innerHTML=sanitizeHtml(ev.html); e.classList.add("built"); touch(ev.element); } break; }
+    case "edit": { const e=el(ev.element); if(e){ renderSafeHtml(e,ev.html); e.classList.add("built"); touch(ev.element); } break; }
     case "artifact": renderBridgeArtifact(ev.card,ev.lines); break;
     case "decision": askDecision(ev.title,ev.why,ev.options||[]).then(i=>{ if(bridgeWs?.readyState===1) bridgeWs.send(JSON.stringify({type:"decision-answer",id:ev.id,index:i})); }); break;
     case "approval": waitApproval(ev.summary||"",ev.title).then(v=>{ if(bridgeWs?.readyState===1) bridgeWs.send(JSON.stringify({type:"approval-answer",id:ev.id,verdict:v,instruction:v==="changes"?"Make it clearer and stronger — rework the main region.":undefined})); }); break;
     case "ship": $("#ship-badge").classList.remove("hidden"); chat("sys",`— shipped · preview ${BRIDGE_HTTP}${ev.preview||""} · workspace ${ev.workspace||""} —`); break;
-    case "error": chat("sys","— "+esc(ev.message||"bridge error")+" —"); playing=false; bridgeRunning=false; $("#btn-start").disabled=false; break;
+    case "error": chat("sys","— "+(ev.message||"bridge error")+" —"); playing=false; bridgeRunning=false; $("#btn-start").disabled=false; break;
     case "done": playing=false; bridgeRunning=false; $("#btn-start").disabled=false; chat("sys","— pipeline complete · crew standing by —"); break;
   }
 }
@@ -330,7 +546,7 @@ function connectBridge(){
 }
 function startBridgeBuild(intent){
   resetTable(); bridgeRunning=true; playing=true; $("#btn-start").disabled=true;
-  chat("sys","— real build opening on the table —"); chat("you",esc(intent));
+  chat("sys","— real build opening on the table —"); chat("you",intent);
   bridgeWs.send(JSON.stringify({type:"intent",text:intent}));
 }
 
@@ -349,14 +565,14 @@ $("#btn-replay").onclick=()=>{ if(playing) return; if(bridgeReady) startBridgeBu
 $("#ask-form").addEventListener("submit",e=>{ e.preventDefault(); const v=$("#ask-input").value.trim(); if(!v) return; $("#ask-input").value="";
   const isStatus=/^(status|eta)\b|what.*(doing|happening|going on)|how long|progress|where are (we|you)/i.test(v);
   if(isStatus){
-    chat("you",esc(v));
+    chat("you",v);
     if(bridgeWs?.readyState===1) bridgeWs.send(JSON.stringify({type:"status-query"}));
     else { const now=document.querySelector(".phase.now")?.textContent.trim()||"Intent"; queueSay("lexi", playing ? `Status: simulated run · we're in the ${now} phase. (Bridge offline — real status & ETA need the bridge.)` : "Status: at the table, nothing running. Give me an intent and I'll assemble the crew."); }
     return;
   }
   const isQuestion=/^(why|what|how|when|who|which|where)\b/i.test(v) || (/\?\s*$/.test(v) && !/^(can|could|will|would) you (make|change|add|remove|fix|build|create|update|move|use|keep|switch)/i.test(v));
-  if(isQuestion && bridgeWs?.readyState===1){ chat("you",esc(v)); bridgeWs.send(JSON.stringify({type:"ask",text:v})); return; }
-  if(playing && bridgeRunning && bridgeWs?.readyState===1){ chat("you",esc(v)); bridgeWs.send(JSON.stringify({type:"steer",text:v})); return; }
+  if(isQuestion && bridgeWs?.readyState===1){ chat("you",v); bridgeWs.send(JSON.stringify({type:"ask",text:v})); return; }
+  if(playing && bridgeRunning && bridgeWs?.readyState===1){ chat("you",v); bridgeWs.send(JSON.stringify({type:"steer",text:v})); return; }
   if(playing) return;
   $("#blank").style.display="none";
   if(bridgeReady && !el("nav").classList.contains("built")) startBridgeBuild(v);
@@ -364,7 +580,7 @@ $("#ask-form").addEventListener("submit",e=>{ e.preventDefault(); const v=$("#as
 document.querySelectorAll(".dt").forEach(b=>b.onclick=()=>{ document.querySelectorAll(".dt").forEach(x=>x.classList.toggle("on",x===b));
   const mobile=b.dataset.device==="mobile"; $("#device").classList.toggle("phone",mobile);
   $("#device-url").textContent= mobile ? "Acme · app" : "preview.localhost";
-  setTimeout(homes,60); if(byId.lexi.summoned) say("lexi", mobile ? "Table's a phone now. Same pipeline, smaller canvas." : "Back to the laptop screen.",800); });
+  setTimeout(homes,60); if(byId.get("lexi").summoned) say("lexi", mobile ? "Table's a phone now. Same pipeline, smaller canvas." : "Back to the laptop screen.",800); });
 
 /* ---------- crew collapse (chat keeps the height) ---------- */
 $("#crew-toggle").addEventListener("click",()=>{

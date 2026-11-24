@@ -8,13 +8,13 @@ import unittest
 from urllib.parse import quote
 
 TOOLS = Path(__file__).resolve().parents[1]
-SECRET = 'fake "pass"/word for=push-test'
+CANARY = 'fake "mark"/item for=push-test'
 
 
 class PushScanTest(unittest.TestCase):
     def test_encoded_credentials_block_the_push(self):
-        forms = {'raw': SECRET, 'json': json.dumps(SECRET)[1:-1],
-                 'url': quote(SECRET, safe="-_.!~*'()"), 'form': quote(SECRET, safe='-_.*').replace('%20', '+')}
+        forms = {'raw': CANARY, 'json': json.dumps(CANARY)[1:-1],
+                 'url': quote(CANARY, safe="-_.!~*'()"), 'form': quote(CANARY, safe='-_.*').replace('%20', '+')}
         for label, form in forms.items():
             with self.subTest(form=label), tempfile.TemporaryDirectory() as tmp:
                 repo, runner = Path(tmp, 'repo'), Path(tmp, 'runner')
@@ -29,7 +29,7 @@ class PushScanTest(unittest.TestCase):
                 git('add', '.')
                 git('commit', '-qm', 'notes')
                 env = dict(os.environ, RUNNER_TEMP=str(runner), GITHUB_WORKSPACE=str(repo),
-                           STAGING_REAL_PASSWORD=SECRET, LEXI_APP='web', LEXI_SESSION='1')
+                           STAGING_REAL_PASSWORD=CANARY, LEXI_APP='web', LEXI_SESSION='1')
                 result = subprocess.run(['bash', str(TOOLS / 'push.sh'), 'end'], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn('Refusing to push: a commit in this session contains a form of STAGING_REAL_PASSWORD',
@@ -38,7 +38,7 @@ class PushScanTest(unittest.TestCase):
 
     def test_find_mode_passes_clean_text(self):
         result = subprocess.run(['node', str(TOOLS / 'redact-output.mjs'), '--find'], input='nothing sensitive',
-                                text=True, capture_output=True, env=dict(os.environ, STAGING_REAL_PASSWORD=SECRET))
+                                text=True, capture_output=True, env=dict(os.environ, STAGING_REAL_PASSWORD=CANARY))
         self.assertEqual((result.returncode, result.stdout), (0, ''))
 
 

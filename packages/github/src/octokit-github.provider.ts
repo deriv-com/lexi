@@ -1756,7 +1756,12 @@ export class OctokitGithubProvider implements GitHubProvider {
    */
   async getTree(owner: string, repo: string, path?: string, ref?: string): Promise<GithubTreeResult> {
     const empty: GithubTreeResult = { entries: [], truncated: false };
-    const normalised = (path ?? "").replace(/^\/+|\/+$/g, "");
+    const rawPath = path ?? "";
+    let start = 0;
+    let end = rawPath.length;
+    while (start < end && rawPath[start] === "/") start += 1;
+    while (end > start && rawPath[end - 1] === "/") end -= 1;
+    const normalised = rawPath.slice(start, end);
     const client = await this.getClientForRepo(owner, repo);
 
     try {

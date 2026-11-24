@@ -418,6 +418,39 @@ function refuse(text: string): AppBuildOutcome {
   return { status: "refused", text };
 }
 
+function stripHtmlCommentOnce(input: string): string {
+  let out = "";
+  let pos = 0;
+  while (pos < input.length) {
+    const start = input.indexOf("<!--", pos);
+    if (start === -1) {
+      out += input.slice(pos);
+      break;
+    }
+    out += input.slice(pos, start);
+    let scan = start + 4;
+    let end = -1;
+    while (scan < input.length) {
+      const dash = input.indexOf("--", scan);
+      if (dash === -1) break;
+      if (input[dash + 2] === ">") {
+        end = dash + 3;
+        break;
+      }
+      if (input[dash + 2] === "!" && input[dash + 3] === ">") {
+        end = dash + 4;
+        break;
+      }
+      scan = dash + 1;
+    }
+    if (end === -1) {
+      break;
+    }
+    pos = end;
+  }
+  return out;
+}
+
 /**
  * Removes HTML comments, so relayed text can never carry an
  * `<!-- app-build:… -->` marker. The loop decides its feedback window and a
@@ -427,18 +460,21 @@ function refuse(text: string): AppBuildOutcome {
 export function sanitizeFeedback(message: string): string {
   // Repeat until stable: removing an inner comment can splice an outer marker
   // back together ("<!<!-- -->-- app-build:report -->"). Then drop any stray
-  // delimiter or marker prefix left behind.
+  // delimiter or marker prefix left behind until fixed point.
   let text = message;
-  for (let i = 0; i < 20; i += 1) {
-    const next = text.replace(/<!--[\s\S]*?(?:-->|$)/g, "");
+  while (true) {
+    const next = stripHtmlCommentOnce(text)
+      .split("<!--")
+      .join("")
+      .split("--!>")
+      .join("")
+      .split("-->")
+      .join("")
+      .replace(/app-build:/gi, "");
     if (next === text) break;
     text = next;
   }
-  return text
-    .replace(/<!--|-->/g, "")
-    .replace(/app-build:/gi, "")
-    .trim()
-    .slice(0, MAX_FEEDBACK_CHARS);
+  return text.trim().slice(0, MAX_FEEDBACK_CHARS);
 }
 
 /** A plain-text summary of a build's status, for a chat reply or a log line. */

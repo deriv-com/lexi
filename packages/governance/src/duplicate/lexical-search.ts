@@ -23,9 +23,21 @@ function tokenize(text: string): string[] {
     .filter((t) => t.length >= 3);
 }
 
+function extractErrorPatterns(text: string): string[] {
+  const out: string[] = [];
+  for (const word of text.match(/[A-Za-z]+/g) ?? []) {
+    const lastError = word.toLowerCase().lastIndexOf("error");
+    if (lastError >= 2) {
+      out.push(word.slice(0, lastError + "error".length));
+    }
+  }
+  out.push(...(text.match(/ERR_[A-Z0-9_]+|failed to fetch/gi) ?? []));
+  return out;
+}
+
 function extractSignatures(text: string): string[] {
   const signatures: string[] = [];
-  const errorPatterns = text.match(/[A-Z][A-Za-z]+Error|ERR_[A-Z0-9_]+|failed to fetch/gi) ?? [];
+  const errorPatterns = extractErrorPatterns(text);
   const urls = text.match(/https?:\/\/[^\s)]+/g) ?? [];
   const routes = text.match(/\/[a-z0-9][a-z0-9/_-]*/gi) ?? [];
   signatures.push(...errorPatterns, ...urls.slice(0, 5), ...routes.slice(0, 10));

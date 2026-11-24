@@ -55,12 +55,56 @@ const R = [
   ['WARN', 'bounce', /animate-(bounce|ping|pulse)\b/, 'Looping attention animation (bounce / ping / pulse dot).'],
 ];
 
+function stripCommentsFromLine(line, state) {
+  let out = '';
+  let pos = 0;
+  while (pos < line.length) {
+    if (state.block) {
+      const end = line.indexOf('*/', pos);
+      if (end === -1) return out;
+      state.block = false;
+      pos = end + 2;
+      continue;
+    }
+    if (state.html) {
+      let scan = pos;
+      let end = -1;
+      while (scan < line.length) {
+        const dash = line.indexOf('--', scan);
+        if (dash === -1) break;
+        if (line[dash + 2] === '>') { end = dash + 3; break; }
+        if (line[dash + 2] === '!' && line[dash + 3] === '>') { end = dash + 4; break; }
+        scan = dash + 1;
+      }
+      if (end === -1) return out;
+      state.html = false;
+      pos = end;
+      continue;
+    }
+    const lineIdx = line.indexOf('//', pos);
+    const blockIdx = line.indexOf('/*', pos);
+    const htmlIdx = line.indexOf('<!--', pos);
+    let nextIdx = -1;
+    let kind = '';
+    for (const [idx, k] of [[lineIdx, 'line'], [blockIdx, 'block'], [htmlIdx, 'html']]) {
+      if (idx !== -1 && (nextIdx === -1 || idx < nextIdx)) { nextIdx = idx; kind = k; }
+    }
+    if (nextIdx === -1) { out += line.slice(pos); break; }
+    out += line.slice(pos, nextIdx);
+    if (kind === 'line') break;
+    if (kind === 'block') { state.block = true; pos = nextIdx + 2; }
+    else { state.html = true; pos = nextIdx + 4; }
+  }
+  return out;
+}
+
 const findings = [];
 let emDashes = 0;
 for (const file of files) {
   const rel = relative(process.cwd(), file).split('\\').join('/');
   const lines = readFileSync(file, 'utf8').split(/\r?\n/);
   let inCode = false; let selector = ''; let pending = '';
+  const commentState = { block: false, html: false };
   lines.forEach((line, i) => {
     // track the CSS selector we are inside, so rules scoped to [data-ui] (interface fragments) keep their own lines
     if (line.includes('{')) { selector = pending + line.slice(0, line.indexOf('{')); pending = ''; } else if (!line.includes('}')) pending = (pending + ' ' + line).slice(-300);
@@ -69,9 +113,10 @@ for (const file of files) {
     if (/<(pre|code)\b/i.test(line)) inCode = true;
     const codeLine = inCode || /<(pre|code|kbd|samp)\b/i.test(line);
     if (/<\/(pre|code)>/i.test(line)) inCode = false;
+    const withoutComments = stripCommentsFromLine(line, commentState);
     if (line.length > 2000) return; // minified or data
     if (/taste-skill-ignore/.test(line)) return;
-    if (!/^\s*(\/\/|\/\*|\*|<!--)/.test(line)) emDashes += (line.replace(/\/\/.*$|\/\*.*?\*\/|<!--.*?-->/g, '').match(/—/g) || []).length; // comments are not copy
+    if (!/^\s*\*/.test(line)) emDashes += (withoutComments.match(/—/g) || []).length; // comments are not copy
     for (const [level, id, re, message] of R) {
       if (id === 'mono' && (codeLine || /(^|[\s,>+~(])(pre|code|kbd|samp)\b|code/i.test(selector))) continue; // real code may be monospace
       if ((id === 'hairline' || id === 'outlined-box') && /(^|[\s,>+~(])(table|thead|tbody|tfoot|tr|td|th|input|textarea|select|fieldset)\b/i.test(selector)) continue; // real tables and form fields keep their lines

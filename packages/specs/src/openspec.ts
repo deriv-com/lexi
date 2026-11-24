@@ -67,14 +67,22 @@ export interface OpenSpecDocument {
   readonly problems: readonly string[];
 }
 
-const TITLE = /^#\s+(.+?)\s+Specification\s*$/;
-const H2 = /^##\s+(.+?)\s*$/;
-const REQUIREMENT = /^###\s+Requirement:\s*(.+?)\s*$/;
-const SCENARIO = /^####\s+Scenario:\s*(.+?)\s*$/;
-const WHEN = /^-\s+\*\*WHEN\*\*\s+(.+?)\s*$/;
-const THEN = /^-\s+\*\*THEN\*\*\s+(.+?)\s*$/;
+const H2 = /^##[^\S\r\n]+(\S[\s\S]*)$/;
+const REQUIREMENT = /^###[^\S\r\n]+Requirement:[^\S\r\n]*(\S[\s\S]*)$/;
+const SCENARIO = /^####[^\S\r\n]+Scenario:[^\S\r\n]*(\S[\s\S]*)$/;
+const WHEN = /^-[^\S\r\n]+\*\*WHEN\*\*[^\S\r\n]+(\S[\s\S]*)$/;
+const THEN = /^-[^\S\r\n]+\*\*THEN\*\*[^\S\r\n]+(\S[\s\S]*)$/;
 /** Any heading, used to detect where a block ends. */
 const ANY_HEADING = /^#{1,6}\s/;
+
+function matchOpenSpecTitle(line: string): string | null {
+  if (!line.startsWith("#") || line.length < 2 || !/\s/.test(line[1]!)) return null;
+  if (!line.endsWith("Specification")) return null;
+  const beforeSpec = line.slice(1, line.length - "Specification".length);
+  if (beforeSpec.length < 3 || !/\s/.test(beforeSpec[beforeSpec.length - 1]!)) return null;
+  if (/[\r\n\u2028\u2029]/.test(beforeSpec)) return null;
+  return beforeSpec.slice(1, -1);
+}
 
 interface MutableRequirement {
   name: string;
@@ -126,9 +134,9 @@ export function parseOpenSpec(markdown: string): OpenSpecDocument {
     const line = raw.trimEnd();
     const lineNumber = index + 1;
 
-    const title = TITLE.exec(line);
-    if (title?.[1]) {
-      domain = title[1].trim();
+    const title = matchOpenSpecTitle(line);
+    if (title) {
+      domain = title.trim();
       continue;
     }
 

@@ -423,7 +423,7 @@ describe("agent-sandbox.sh", () => {
     run("bash", [script("agent-sandbox.sh"), "reset-file-commands"], {
       env: { PATH: process.env.PATH, GITHUB_ENV: envFile, GITHUB_PATH: pathFile, GITHUB_OUTPUT: out },
     });
-    for (const f of [envFile, pathFile, out]) expect(execFileSync("cat", [f], { encoding: "utf8" })).toBe("");
+    for (const f of [envFile, pathFile, out]) expect(readFileSync(f, { encoding: "utf8" })).toBe("");
   });
 });
 

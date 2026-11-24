@@ -55,10 +55,10 @@ export function parseMcpHttpBody(body: string): unknown {
   }
   const payloads: unknown[] = [];
   for (const line of trimmed.split("\n")) {
-    const match = /^data:\s*(.+)$/.exec(line.trim());
-    if (!match) continue;
-    const data = match[1]!.trim();
-    if (data === "[DONE]") continue;
+    const trimmedLine = line.trim();
+    if (!trimmedLine.startsWith("data:")) continue;
+    const data = trimmedLine.slice("data:".length).trim();
+    if (!data || data === "[DONE]") continue;
     payloads.push(JSON.parse(data) as unknown);
   }
   if (payloads.length === 0) {
@@ -792,6 +792,46 @@ function plansFromUnknown(value: unknown): FigmaPlan[] {
   return [];
 }
 
+function extractEmbeddedJsonObjects(text: string): string[] {
+  if (!text.includes('"plans"')) return [];
+  const candidates: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const slice = text.slice(start, i + 1);
+        if (slice.includes('"plans"')) candidates.push(slice);
+        start = -1;
+      }
+    }
+  }
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const outer = text.slice(firstBrace, lastBrace + 1);
+    if (outer.includes('"plans"') && !candidates.includes(outer)) {
+      candidates.push(outer);
+    }
+  }
+  return candidates;
+}
+
 /** Plans from `whoami` JSON or from a stringified payload in `text`. */
 export function parseFigmaPlans(text: string, raw?: unknown): FigmaPlan[] {
   const fromRaw = plansFromUnknown(raw);
@@ -803,10 +843,9 @@ export function parseFigmaPlans(text: string, raw?: unknown): FigmaPlan[] {
   } catch {
     // whoami may be prose wrapping a JSON object
   }
-  const embedded = /\{[\s\S]*"plans"\s*:\s*\[[\s\S]*\][\s\S]*\}/.exec(text);
-  if (embedded) {
+  for (const candidate of extractEmbeddedJsonObjects(text)) {
     try {
-      const fromEmbedded = plansFromUnknown(JSON.parse(embedded[0]));
+      const fromEmbedded = plansFromUnknown(JSON.parse(candidate));
       if (fromEmbedded.length > 0) return fromEmbedded;
     } catch {
       // fall through
@@ -906,7 +945,7 @@ function looksLikePageListing(text: string): boolean {
   if (/<frame\b/i.test(text)) return false;
   if (/"startingNodeId"\s*:/.test(text)) return false;
   if (/Top-level pages/i.test(text)) return true;
-  return /(?:^|\n)\s*-\s*\d+[:-]\d+\s*:/m.test(text);
+  return /^[^\S\r\n]*-[^\S\r\n]*\d+[:-]\d+[^\S\r\n]*:/m.test(text);
 }
 
 /**
@@ -914,11 +953,11 @@ function looksLikePageListing(text: string): boolean {
  * Never use this as `starting-point-node-id`.
  */
 export function extractCanvasPageId(text: string): string | undefined {
-  const line = /(?:^|\n)\s*-\s*(\d+[:-]\d+)\s*:/.exec(text);
+  const line = /^[^\S\r\n]*-[^\S\r\n]*(\d+[:-]\d+)[^\S\r\n]*:/m.exec(text);
   if (line?.[1]) return normalizeFigmaNodeId(line[1]);
-  const canvas = /<(?:canvas|page)[^>]*(?:id|node-id)=["'](\d+[:-]\d+)["']/i.exec(text);
+  const canvas = /<(?:canvas|page)\b[^<>]*(?:id|node-id)=["'](\d+[:-]\d+)["']/i.exec(text);
   if (canvas?.[1]) return normalizeFigmaNodeId(canvas[1]);
-  const named = /(\d+[:-]\d+)\s*:\s*(?:Page|Cover)\b/i.exec(text);
+  const named = /(?<!\d)(\d+[:-]\d+)\s*:\s*(?:Page|Cover)\b/i.exec(text);
   if (named?.[1]) return normalizeFigmaNodeId(named[1]);
   return undefined;
 }
@@ -1038,17 +1077,19 @@ export function extractStartingNodeId(text: string, preferredFrameName?: string)
   }
   if (looksLikePageListing(text)) return undefined;
 
-  const idPattern = /(\d+[:-]\d+)/;
+  const idPattern = /(?<!\d)(\d+[:-]\d+)/;
   if (preferredFrameName && preferredFrameName.length > 0) {
     const escaped = preferredFrameName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const named = new RegExp(
-      `(?:name=["']${escaped}["'][^>]*(?:id|node-id|nodeId)=["']([^"']+)["']|(?:id|node-id|nodeId)=["']([^"']+)["'][^>]*name=["']${escaped}["'])`,
-      "i",
-    );
-    const namedMatch = named.exec(text);
-    const candidate = namedMatch?.[1] ?? namedMatch?.[2];
-    if (candidate && idPattern.test(candidate) && !isUnusableProtoStart(candidate, text)) {
-      return normalizeFigmaNodeId(candidate);
+    const nameAttr = new RegExp(`(?:^|\\s)name=["']${escaped}["']`, "i");
+    const idAttr = /(?:^|\s)(?:id|node-id|nodeId)=["']([^"']+)["']/i;
+    for (const chunk of text.split("<")) {
+      const closeIdx = chunk.indexOf(">");
+      const tagBody = closeIdx === -1 ? chunk : chunk.slice(0, closeIdx);
+      if (!nameAttr.test(tagBody)) continue;
+      const candidate = idAttr.exec(tagBody)?.[1];
+      if (candidate && idPattern.test(candidate) && !isUnusableProtoStart(candidate, text)) {
+        return normalizeFigmaNodeId(candidate);
+      }
     }
   }
   const attr = /(?:id|node-id|nodeId)=["'](\d+[:-]\d+)["']/.exec(text);
@@ -1087,7 +1128,9 @@ export function isAllowedFigmaMcpUrl(url: string): boolean {
   if (parsed.username || parsed.password) return false;
   if (parsed.search || parsed.hash) return false;
   if (parsed.hostname !== "mcp.figma.com") return false;
-  const path = parsed.pathname.replace(/\/+$/, "") || "/";
+  let end = parsed.pathname.length;
+  while (end > 0 && parsed.pathname[end - 1] === "/") end -= 1;
+  const path = parsed.pathname.slice(0, end) || "/";
   return path === "/mcp";
 }
 
